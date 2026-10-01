@@ -129,6 +129,62 @@ def init_db() -> None:
             event_hash TEXT NOT NULL,
             created_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS pocket_projects (
+            project_id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            description TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS pocket_loops (
+            loop_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES pocket_projects(project_id),
+            title TEXT NOT NULL,
+            objective TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS pocket_shadow (
+            shadow_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES pocket_projects(project_id),
+            kind TEXT NOT NULL,
+            content TEXT NOT NULL,
+            confidence REAL NOT NULL,
+            evidence TEXT NOT NULL,
+            authority TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS pocket_proposals (
+            proposal_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES pocket_projects(project_id),
+            loop_id TEXT REFERENCES pocket_loops(loop_id),
+            shadow_id TEXT REFERENCES pocket_shadow(shadow_id),
+            agent_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            category TEXT NOT NULL,
+            candidate TEXT NOT NULL,
+            proposed_cost TEXT NOT NULL,
+            recurring INTEGER NOT NULL,
+            access_level TEXT NOT NULL,
+            expected_benefit TEXT NOT NULL,
+            evidence TEXT NOT NULL,
+            recommendation TEXT NOT NULL,
+            status TEXT NOT NULL,
+            authority TEXT NOT NULL,
+            execution_authorized INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            approved_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS pocket_events (
+            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id TEXT NOT NULL UNIQUE,
+            event_type TEXT NOT NULL,
+            entity_id TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            previous_hash TEXT NOT NULL,
+            event_hash TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL
+        );
         ''')
         mission_columns = {row['name'] for row in db.execute('PRAGMA table_info(missions)').fetchall()}
         if 'task_type' not in mission_columns:
@@ -230,12 +286,87 @@ class MemoryRetractRequest(BaseModel):
     actor: str = 'system'
 
 
+class PocketProjectCreate(BaseModel):
+    name: str = Field(min_length=1)
+    description: str = Field(min_length=1)
+
+
+class PocketLoopCreate(BaseModel):
+    title: str = Field(min_length=1)
+    objective: str = Field(min_length=1)
+
+
+class ShadowCreate(BaseModel):
+    kind: str = Field(pattern=r'^(observation|insight|warning|opportunity|question|recommendation)$')
+    content: str = Field(min_length=1)
+    confidence: float = Field(ge=0, le=1)
+    evidence: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ProposalCreate(BaseModel):
+    project_id: str
+    loop_id: str | None = None
+    shadow_id: str | None = None
+    agent_id: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    category: str = Field(min_length=1)
+    candidate: dict[str, Any]
+    proposed_cost: str = Field(pattern=r'^\d+(\.\d{1,6})?$')
+    recurring: bool = False
+    access_level: str = Field(pattern=r'^(none|read_only|write|admin)$')
+    expected_benefit: dict[str, Any]
+    evidence: list[dict[str, Any]] = Field(default_factory=list)
+    recommendation: str = Field(pattern=r'^(REJECT|TRIAL_EXTENDED|HOLD_FOR_APPROVAL|APPROVED_TO_PURCHASE)$')
+
+
+class ProposalApproval(BaseModel):
+    decision: str = Field(pattern=r'^(approve|reject|request_more_testing)$')
+    actor: str = Field(min_length=1)
+
+
 def row_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
 def ledger(db: sqlite3.Connection, wallet_id: str, event: str, amount: Decimal, *, mission_id: str | None = None, reservation_id: str | None = None, metadata: dict[str, Any] | None = None) -> None:
     db.execute('INSERT INTO ledger VALUES (?, ?, ?, ?, ?, ?, ?, ?)', (str(uuid.uuid4()), wallet_id, mission_id, reservation_id, event, money_str(amount), json.dumps(metadata or {}, sort_keys=True), now()))
+
+
+def pocket_event(db: sqlite3.Connection, event_type: str, entity_id: str, payload: dict[str, Any]) -> None:
+    previous = db.execute('SELECT event_hash FROM pocket_events ORDER BY sequence DESC LIMIT 1').fetchone()
+    previous_hash = previous['event_hash'] if previous else '0' * 64
+    created_at = now()
+    body = {'event_type': event_type, 'entity_id': entity_id, 'payload': payload, 'previous_hash': previous_hash, 'created_at': created_at}
+    event_hash = hashlib.sha256(json.dumps(body, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
+    event_id = hashlib.sha256(event_hash.encode()).hexdigest()[:32]
+    db.execute('INSERT INTO pocket_events(event_id,event_type,entity_id,payload,previous_hash,event_hash,created_at) VALUES (?, ?, ?, ?, ?, ?, ?)', (event_id, event_type, entity_id, json.dumps(payload, sort_keys=True), previous_hash, event_hash, created_at))
+
+
+def verify_pocket_events(db: sqlite3.Connection) -> bool:
+    previous_hash = '0' * 64
+    for row in db.execute('SELECT * FROM pocket_events ORDER BY sequence').fetchall():
+        if row['previous_hash'] != previous_hash:
+            return False
+        body = {'event_type': row['event_type'], 'entity_id': row['entity_id'], 'payload': json.loads(row['payload']), 'previous_hash': row['previous_hash'], 'created_at': row['created_at']}
+        expected = hashlib.sha256(json.dumps(body, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
+        if expected != row['event_hash']:
+            return False
+        previous_hash = row['event_hash']
+    return True
+
+
+def require_project(db: sqlite3.Connection, project_id: str) -> sqlite3.Row:
+    project = db.execute('SELECT * FROM pocket_projects WHERE project_id = ?', (project_id,)).fetchone()
+    if not project:
+        raise HTTPException(404, 'Pocket OS project not found')
+    return project
+
+
+def require_proposal(db: sqlite3.Connection, proposal_id: str) -> sqlite3.Row:
+    proposal = db.execute('SELECT * FROM pocket_proposals WHERE proposal_id = ?', (proposal_id,)).fetchone()
+    if not proposal:
+        raise HTTPException(404, 'Pocket OS proposal not found')
+    return proposal
 
 
 def require_wallet(db: sqlite3.Connection, wallet_id: str) -> sqlite3.Row:
@@ -248,16 +379,135 @@ def require_wallet(db: sqlite3.Connection, wallet_id: str) -> sqlite3.Row:
 @app.get('/health')
 def health() -> dict[str, Any]:
     memory_health = MEMORY.health()
+    with closing(connect()) as db:
+        pocket_ledger_verified = verify_pocket_events(db)
     return {
-        'status': 'ok' if memory_health['ledger_verified'] else 'degraded',
+        'status': 'ok' if memory_health['ledger_verified'] and pocket_ledger_verified else 'degraded',
         'service': 'sovereign-economic-engine',
         'components': {
             'economic_wallet': 'ready',
             'micro_billing': 'ready_in_process_memory',
             'memory': memory_health,
+            'pocket_os': {'status': 'ok', 'event_ledger_verified': pocket_ledger_verified},
             'external_model_executor': 'not_connected',
         },
     }
+
+
+@app.post('/pocket/projects', status_code=201)
+def create_pocket_project(payload: PocketProjectCreate) -> dict[str, Any]:
+    project_id = f'project_{uuid.uuid4().hex[:12]}'
+    with closing(connect()) as db:
+        db.execute('INSERT INTO pocket_projects VALUES (?, ?, ?, ?, ?)', (project_id, payload.name, payload.description, 'active', now()))
+        pocket_event(db, 'PROJECT_CREATED', project_id, payload.model_dump())
+        db.commit()
+        return row_dict(db.execute('SELECT * FROM pocket_projects WHERE project_id = ?', (project_id,)).fetchone()) or {}
+
+
+@app.get('/pocket/projects')
+def list_pocket_projects() -> list[dict[str, Any]]:
+    with closing(connect()) as db:
+        return [row_dict(row) or {} for row in db.execute('SELECT * FROM pocket_projects ORDER BY created_at DESC').fetchall()]
+
+
+@app.post('/pocket/projects/{project_id}/loops', status_code=201)
+def create_pocket_loop(project_id: str, payload: PocketLoopCreate) -> dict[str, Any]:
+    loop_id = f'loop_{uuid.uuid4().hex[:12]}'
+    with closing(connect()) as db:
+        require_project(db, project_id)
+        db.execute('INSERT INTO pocket_loops VALUES (?, ?, ?, ?, ?, ?)', (loop_id, project_id, payload.title, payload.objective, 'open', now()))
+        pocket_event(db, 'OPEN_LOOP_CREATED', loop_id, {'project_id': project_id, **payload.model_dump()})
+        db.commit()
+        return row_dict(db.execute('SELECT * FROM pocket_loops WHERE loop_id = ?', (loop_id,)).fetchone()) or {}
+
+
+@app.post('/pocket/projects/{project_id}/shadow', status_code=201)
+def create_shadow_observation(project_id: str, payload: ShadowCreate) -> dict[str, Any]:
+    shadow_id = f'shadow_{uuid.uuid4().hex[:12]}'
+    with closing(connect()) as db:
+        require_project(db, project_id)
+        db.execute('INSERT INTO pocket_shadow VALUES (?, ?, ?, ?, ?, ?, ?, ?)', (shadow_id, project_id, payload.kind, payload.content, payload.confidence, json.dumps(payload.evidence, sort_keys=True), 'NONE', now()))
+        pocket_event(db, 'SHADOW_OBSERVED', shadow_id, {'project_id': project_id, **payload.model_dump(), 'authority': 'NONE', 'can_execute': False, 'can_ratify': False})
+        db.commit()
+        return {**(row_dict(db.execute('SELECT * FROM pocket_shadow WHERE shadow_id = ?', (shadow_id,)).fetchone()) or {}), 'authority': 'NONE', 'can_execute': False, 'can_ratify': False}
+
+
+@app.get('/pocket/shadow')
+def list_shadow_observations(project_id: str | None = None) -> list[dict[str, Any]]:
+    with closing(connect()) as db:
+        if project_id:
+            require_project(db, project_id)
+            rows = db.execute('SELECT * FROM pocket_shadow WHERE project_id = ? ORDER BY created_at DESC', (project_id,)).fetchall()
+        else:
+            rows = db.execute('SELECT * FROM pocket_shadow ORDER BY created_at DESC').fetchall()
+        return [{**(row_dict(row) or {}), 'authority': 'NONE', 'can_execute': False, 'can_ratify': False} for row in rows]
+
+
+@app.post('/pocket/proposals', status_code=201)
+def create_pocket_proposal(payload: ProposalCreate) -> dict[str, Any]:
+    try:
+        cost = money(payload.proposed_cost)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    proposal_id = f'proposal_{uuid.uuid4().hex[:12]}'
+    initial_status = 'REJECTED' if payload.recommendation == 'REJECT' else ('HOLD_FOR_APPROVAL' if payload.recommendation == 'APPROVED_TO_PURCHASE' else payload.recommendation)
+    with closing(connect()) as db:
+        require_project(db, payload.project_id)
+        if payload.loop_id:
+            loop = db.execute('SELECT * FROM pocket_loops WHERE loop_id = ? AND project_id = ?', (payload.loop_id, payload.project_id)).fetchone()
+            if not loop:
+                raise HTTPException(422, 'loop does not belong to project')
+        if payload.shadow_id:
+            shadow = db.execute('SELECT * FROM pocket_shadow WHERE shadow_id = ? AND project_id = ?', (payload.shadow_id, payload.project_id)).fetchone()
+            if not shadow:
+                raise HTTPException(422, 'shadow observation does not belong to project')
+        if not payload.evidence and initial_status in {'HOLD_FOR_APPROVAL', 'APPROVED_TO_PURCHASE'}:
+            raise HTTPException(422, 'purchase recommendations require evidence')
+        db.execute('INSERT INTO pocket_proposals (proposal_id, project_id, loop_id, shadow_id, agent_id, title, category, candidate, proposed_cost, recurring, access_level, expected_benefit, evidence, recommendation, status, authority, execution_authorized, created_at, approved_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', (proposal_id, payload.project_id, payload.loop_id, payload.shadow_id, payload.agent_id, payload.title, payload.category, json.dumps(payload.candidate, sort_keys=True), money_str(cost), int(payload.recurring), payload.access_level, json.dumps(payload.expected_benefit, sort_keys=True), json.dumps(payload.evidence, sort_keys=True), payload.recommendation, initial_status, 'NONE', 0, now(), None))
+        pocket_event(db, 'PROPOSAL_CREATED', proposal_id, {'project_id': payload.project_id, 'agent_id': payload.agent_id, 'recommendation': payload.recommendation, 'status': initial_status, 'authority': 'NONE'})
+        db.commit()
+        result = row_dict(db.execute('SELECT * FROM pocket_proposals WHERE proposal_id = ?', (proposal_id,)).fetchone()) or {}
+        result['execution_authorized'] = False
+        return result
+
+
+@app.get('/pocket/proposals')
+def list_pocket_proposals(status: str | None = None) -> list[dict[str, Any]]:
+    with closing(connect()) as db:
+        if status:
+            rows = db.execute('SELECT * FROM pocket_proposals WHERE status = ? ORDER BY created_at DESC', (status,)).fetchall()
+        else:
+            rows = db.execute('SELECT * FROM pocket_proposals ORDER BY created_at DESC').fetchall()
+        return [{**(row_dict(row) or {}), 'execution_authorized': False} for row in rows]
+
+
+@app.post('/pocket/proposals/{proposal_id}/decision')
+def decide_pocket_proposal(proposal_id: str, payload: ProposalApproval) -> dict[str, Any]:
+    with closing(connect()) as db:
+        proposal = require_proposal(db, proposal_id)
+        if payload.decision == 'approve':
+            if proposal['status'] != 'HOLD_FOR_APPROVAL':
+                raise HTTPException(409, 'only a proposal in HOLD_FOR_APPROVAL can be approved')
+            status = 'USER_APPROVED_PENDING_EXTERNAL_PURCHASE'
+            authority = 'HUMAN_RATIFIED'
+            approved_at = now()
+        elif payload.decision == 'reject':
+            status, authority, approved_at = 'REJECTED', 'HUMAN_RATIFIED', None
+        else:
+            status, authority, approved_at = 'TRIAL_EXTENDED', 'HUMAN_RATIFIED', None
+        db.execute('UPDATE pocket_proposals SET status = ?, authority = ?, approved_at = ? WHERE proposal_id = ?', (status, authority, approved_at, proposal_id))
+        pocket_event(db, 'PROPOSAL_DECIDED', proposal_id, {'decision': payload.decision, 'actor': payload.actor, 'status': status, 'execution_authorized': False})
+        db.commit()
+        result = row_dict(db.execute('SELECT * FROM pocket_proposals WHERE proposal_id = ?', (proposal_id,)).fetchone()) or {}
+        result['execution_authorized'] = False
+        result['note'] = 'Approval records a human decision only; it does not purchase, reserve, or authorize execution.'
+        return result
+
+
+@app.get('/pocket/events')
+def list_pocket_events() -> list[dict[str, Any]]:
+    with closing(connect()) as db:
+        return [row_dict(row) or {} for row in db.execute('SELECT * FROM pocket_events ORDER BY sequence ASC').fetchall()]
 
 
 @app.post('/wallets', status_code=201)

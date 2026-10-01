@@ -25,6 +25,7 @@ Establish the smallest executable system that makes the economic boundary real: 
 - Measured-resource settlement: `ResourceUsage` → `PricingPolicy` → wallet reservation consumption/release, with deterministic settlement IDs and retry-safe replay.
 - Synapse micro-billing reference layer: integer micro-cent escrow, telemetry idempotency, expiry refund, conserved revenue splits, and deterministic proof seals.
 - Unified FastAPI surface: dollar wallet/routing/settlement, micro-billing escrow, and durable memory endpoints in one service.
+- Pocket OS control plane: project context, open loops, advisory Shadow observations, evidence-backed improvement proposals, human decision states, and a verified control-plane event chain.
 
 ## Next phases
 
@@ -35,6 +36,7 @@ Establish the smallest executable system that makes the economic boundary real: 
 5. Add outcome verification and economic-memory learning from actual cost and quality.
 6. Add governance policies for risk classes, human review, prohibited capabilities, and model lifecycle admission.
 7. Add a thin operator UI after the API contract stabilizes.
+8. Add Pocket OS council evaluation, capability authorization, typed project projections, and live event synchronization; keep Shadow authority at `NONE`.
 
 The micro-billing API is intentionally marked `ready_in_process_memory` until its durable transaction boundary, agent authorization signatures, and MeshLedger adapter are implemented.
 

@@ -7,9 +7,50 @@ A runnable backend for governed, cost-aware AI work. The service combines the ve
 - **Resource pricing**: CPU, memory, I/O, token, and wall-time measurements converted to cost by a separate pricing policy.
 - **Synapse micro-billing**: integer micro-cent wallets, escrow, telemetry, expiration refunds, revenue splits, and deterministic settlement seals.
 - **Durable memory**: deduplicated memory records with a verifiable SQLite hash-chained provenance ledger.
+- **Pocket OS control plane**: projects, open improvement loops, advisory AI Shadow observations, evidence-backed proposals, human decision records, and a separate hash-chained control-plane event log.
 - **Substrate utilities**: sandbox command construction, checkpoint validation, WAL-tail replay, deterministic canary routing, and latency metrics.
 
 The unverified external SAIL/DRQuinn packages are intentionally not in the execution path.
+
+## Pocket OS control plane
+
+Pocket OS provides the cognitive and governance surface around the economic kernel:
+
+```text
+Shadow observes
+    ↓
+Builder proposes with evidence
+    ↓
+Human reviews or requests more testing
+    ↓
+Economic Engine may later reserve funds
+    ↓
+Provider execution settles through the wallet
+```
+
+Pocket OS routes:
+
+- `POST /pocket/projects`
+- `GET /pocket/projects`
+- `POST /pocket/projects/{project_id}/loops`
+- `POST /pocket/projects/{project_id}/shadow`
+- `GET /pocket/shadow`
+- `POST /pocket/proposals`
+- `GET /pocket/proposals`
+- `POST /pocket/proposals/{proposal_id}/decision`
+- `GET /pocket/events`
+
+Shadow responses explicitly report:
+
+```text
+AUTHORITY: NONE
+CAN EXECUTE: NO
+CAN RATIFY: NO
+```
+
+Purchase recommendations require evidence and enter `HOLD_FOR_APPROVAL`. A human decision can move a proposal to `USER_APPROVED_PENDING_EXTERNAL_PURCHASE`, `REJECTED`, or `TRIAL_EXTENDED`, but it does not purchase, reserve wallet funds, or set `execution_authorized` to true. This preserves the constitutional boundary:
+
+> Memory may inform execution. Memory may not authorize execution.
 
 ## Run it
 
@@ -186,11 +227,11 @@ python3 -m compileall -q app tests
 pytest -q
 ```
 
-Current verified result: **12 passed**.
+Current verified result: **14 passed**.
 
 ## Production boundary
 
-This is a functioning integrated MVP, not a sealed production platform. Remaining work includes a trusted provider executor, direct resource measurement, durable micro-billing persistence, authentication and tenant isolation, Ed25519 capability authorization, strict RFC 8785/JCS integration, crash-safe multi-process settlement, and a governed sandbox promotion path for generated code.
+This is a functioning integrated MVP, not a sealed production platform. Remaining work includes a trusted provider executor, direct resource measurement, durable micro-billing persistence, authentication and tenant isolation, Ed25519 capability authorization, strict RFC 8785/JCS integration, crash-safe multi-process settlement, a governed sandbox promotion path for generated code, and a real Pocket OS council/capability backend beyond the current explicit human-decision record.
 
 Core rule:
 
