@@ -1,0 +1,47 @@
+# Sovereign Economic Engine MVP Plan
+
+## Goal
+
+Establish the smallest executable system that makes the economic boundary real: an authorized mission is routed to a qualified model candidate, execution cost is constrained by a wallet, and settlement is auditable.
+
+## Architecture decisions
+
+- Use **FastAPI** for a typed HTTP boundary.
+- Use **SQLite** for the first persistence layer.
+- Represent monetary values as fixed-precision decimal strings, never binary floats.
+- Fail closed when no qualified model satisfies the mission's quality and cost envelope.
+- Keep routing, authorization, execution, and ledger concepts separate even while they live in one MVP module.
+- Treat the execution endpoint as a provider/executor contract until a real Hugging Face adapter is added.
+
+## Current modules
+
+- Wallet and minimum-liquidity guard.
+- Mission economic envelope.
+- Qualified model registry.
+- Frugal route selection.
+- Atomic demo reservation/settlement.
+- Append-only economic ledger.
+- Corrected substrate contracts in `app/substrate.py`: rootless sandbox command construction, resource metering schema, digest-validated binary checkpoints, WAL-tail replay, deterministic canary routing, and p50/p95/p99 metrics.
+- Measured-resource settlement: `ResourceUsage` → `PricingPolicy` → wallet reservation consumption/release, with deterministic settlement IDs and retry-safe replay.
+- Synapse micro-billing reference layer: integer micro-cent escrow, telemetry idempotency, expiry refund, conserved revenue splits, and deterministic proof seals.
+- Unified FastAPI surface: dollar wallet/routing/settlement, micro-billing escrow, and durable memory endpoints in one service.
+
+## Next phases
+
+1. Split `app/main.py` into domain modules with repositories and services, then replace the demo measurement payload with a real Axiom Forge/provider adapter.
+2. Add reservation idempotency, leases, fencing tokens, and crash recovery before external execution.
+3. Add task profiling and capability matching beyond the current quality/cost filter.
+4. Add provider adapters for Hugging Face Inference Providers and local sandbox execution.
+5. Add outcome verification and economic-memory learning from actual cost and quality.
+6. Add governance policies for risk classes, human review, prohibited capabilities, and model lifecycle admission.
+7. Add a thin operator UI after the API contract stabilizes.
+
+The micro-billing API is intentionally marked `ready_in_process_memory` until its durable transaction boundary, agent authorization signatures, and MeshLedger adapter are implemented.
+
+The v1.3.2 audit note is therefore incorporated as a tested draft substrate, but its `HOLD / NOT_SEALED` posture remains correct until economic wiring, authenticated governance, and production crash-recovery controls are implemented.
+
+## Non-goals for this first step
+
+- Real external payments.
+- Automatic download or admission of arbitrary models.
+- Production-grade authentication, multi-tenant isolation, or cryptographic ledger proofs.
