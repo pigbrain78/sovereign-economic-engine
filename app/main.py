@@ -24,7 +24,7 @@ DB_PATH = Path(__import__('os').environ.get('SOVEREIGN_DB', BASE_DIR / 'sovereig
 app = FastAPI(title='Sovereign Economic Engine', version='0.1.0')
 MICRO_BILLING = SynapseMicroBillingEngine()
 MEMORY = MemoryAPI(__import__('os').environ.get('SOVEREIGN_MEMORY_DB', BASE_DIR / 'sovereign-memory.db'))
-FACTORY_PIPELINE = SoftwareFactoryPipeline(str(BASE_DIR / 'sail_event_spine.jsonl'))
+FACTORY_LEDGER_PATH = Path(__import__('os').environ.get('SOVEREIGN_FACTORY_LEDGER', str(DB_PATH.with_name('sail_event_spine.jsonl'))))
 
 
 def now() -> str:
@@ -50,6 +50,10 @@ def connect() -> sqlite3.Connection:
     connection.row_factory = sqlite3.Row
     connection.execute('PRAGMA foreign_keys = ON')
     return connection
+
+
+def get_factory_pipeline() -> SoftwareFactoryPipeline:
+    return SoftwareFactoryPipeline(str(FACTORY_LEDGER_PATH))
 
 
 def init_db() -> None:
@@ -861,7 +865,7 @@ def qualify_skill(skill_id: str, payload: SkillQualificationRequest) -> dict[str
         skill = require_skill(db, skill_id)
         if skill['status'] not in {'candidate', 'discovered'}:
             raise HTTPException(409, f'skill cannot be qualified from status {skill["status"]}')
-        evaluation = FACTORY_PIPELINE.execute_pipeline(
+        evaluation = get_factory_pipeline().execute_pipeline(
             FactoryPipelineRequest(
                 tool_code=payload.tool_code,
                 test_code=payload.test_code,
