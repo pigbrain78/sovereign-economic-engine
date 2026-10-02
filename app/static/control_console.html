@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AI Economic Control Console</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 24px; color: #111; }
+    h1 { margin-bottom: 8px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+    .card { border: 1px solid #ddd; border-radius: 8px; padding: 12px; }
+    input, button, textarea { width: 100%; margin-top: 6px; margin-bottom: 8px; padding: 8px; box-sizing: border-box; }
+    button { cursor: pointer; }
+    pre { background: #fafafa; border: 1px solid #eee; border-radius: 8px; padding: 12px; max-height: 460px; overflow: auto; }
+    .ok { color: #0a7; font-weight: 600; }
+    .warn { color: #a50; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <h1>AI Economic Control Console</h1>
+  <p>Governance-gated skill lifecycle, economic routing, reservation, measured settlement, and append-only evidence.</p>
+
+  <div class="grid">
+    <div class="card">
+      <h3>Demo simulation</h3>
+      <button id="runDemo">Run controlled mission demo</button>
+      <div id="demoStatus"></div>
+    </div>
+    <div class="card">
+      <h3>Create wallet</h3>
+      <input id="capital" value="10.00" />
+      <input id="minimumLiquidity" value="1.00" />
+      <button id="createWallet">Create wallet</button>
+      <div id="walletStatus"></div>
+    </div>
+    <div class="card">
+      <h3>Create skill candidate</h3>
+      <input id="skillName" value="Tax Skill Candidate" />
+      <textarea id="skillDescription">Candidate skill for controlled tax computation.</textarea>
+      <button id="createSkill">Register candidate</button>
+      <div id="skillStatus"></div>
+    </div>
+  </div>
+
+  <div style="margin-top: 20px;">
+    <button id="refresh">Refresh observability snapshot</button>
+  </div>
+  <pre id="snapshot">Loading...</pre>
+
+  <script>
+    const out = (id, text, cls = "") => {
+      const el = document.getElementById(id);
+      el.className = cls;
+      el.textContent = text;
+    };
+
+    async function refresh() {
+      const res = await fetch('/console/observability');
+      const data = await res.json();
+      document.getElementById('snapshot').textContent = JSON.stringify(data, null, 2);
+    }
+
+    document.getElementById('refresh').onclick = refresh;
+
+    document.getElementById('runDemo').onclick = async () => {
+      const res = await fetch('/console/demo/run', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({}) });
+      const data = await res.json();
+      out('demoStatus', res.ok ? `Demo run status: ${data.run?.status || 'ok'}` : `Demo failed: ${data.detail || 'unknown'}`, res.ok ? "ok" : "warn");
+      await refresh();
+    };
+
+    document.getElementById('createWallet').onclick = async () => {
+      const payload = { capital: document.getElementById('capital').value, minimum_liquidity: document.getElementById('minimumLiquidity').value };
+      const res = await fetch('/wallets', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
+      const data = await res.json();
+      out('walletStatus', res.ok ? `Wallet created: ${data.id}` : `Wallet failed: ${data.detail || 'unknown'}`, res.ok ? "ok" : "warn");
+      await refresh();
+    };
+
+    document.getElementById('createSkill').onclick = async () => {
+      const payload = {
+        name: document.getElementById('skillName').value,
+        description: document.getElementById('skillDescription').value,
+        status: 'candidate',
+        metadata: { source: 'console' },
+        lineage: { parent_skills: [] },
+        provenance: { actor: 'operator' },
+        evidence: [{ type: 'registration' }]
+      };
+      const res = await fetch('/skills/candidates', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
+      const data = await res.json();
+      out('skillStatus', res.ok ? `Skill registered: ${data.skill_id}` : `Skill failed: ${data.detail || 'unknown'}`, res.ok ? "ok" : "warn");
+      await refresh();
+    };
+
+    refresh();
+  </script>
+</body>
+</html>

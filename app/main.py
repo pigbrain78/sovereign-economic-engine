@@ -11,7 +11,9 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
+from app.software_factory_pipeline import FactoryPipelineRequest, SoftwareFactoryPipeline
 from app.substrate import PricingPolicy, ResourceUsage
 from app.memory import MemoryAPI
 from app.micro_billing import MetricType, SplitRevenueContract, SplitRule, SynapseMicroBillingEngine, TelemetryEvent
@@ -22,6 +24,7 @@ DB_PATH = Path(__import__('os').environ.get('SOVEREIGN_DB', BASE_DIR / 'sovereig
 app = FastAPI(title='Sovereign Economic Engine', version='0.1.0')
 MICRO_BILLING = SynapseMicroBillingEngine()
 MEMORY = MemoryAPI(__import__('os').environ.get('SOVEREIGN_MEMORY_DB', BASE_DIR / 'sovereign-memory.db'))
+FACTORY_PIPELINE = SoftwareFactoryPipeline(str(BASE_DIR / 'sail_event_spine.jsonl'))
 
 
 def now() -> str:
@@ -185,6 +188,26 @@ def init_db() -> None:
             event_hash TEXT NOT NULL UNIQUE,
             created_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS skills (
+            skill_id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            description TEXT NOT NULL,
+            status TEXT NOT NULL,
+            metadata TEXT NOT NULL,
+            lineage TEXT NOT NULL,
+            provenance TEXT NOT NULL,
+            evidence TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS skill_events (
+            event_id TEXT PRIMARY KEY,
+            skill_id TEXT NOT NULL REFERENCES skills(skill_id),
+            event_type TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            governance_proof TEXT,
+            created_at TEXT NOT NULL
+        );
         ''')
         mission_columns = {row['name'] for row in db.execute('PRAGMA table_info(missions)').fetchall()}
         if 'task_type' not in mission_columns:
@@ -324,6 +347,67 @@ class ProposalApproval(BaseModel):
     actor: str = Field(min_length=1)
 
 
+class SkillCandidateCreate(BaseModel):
+    name: str = Field(min_length=1)
+    description: str = Field(min_length=1)
+    status: str = Field(default='candidate', pattern=r'^(discovered|candidate)$')
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    lineage: dict[str, Any] = Field(default_factory=dict)
+    provenance: dict[str, Any] = Field(default_factory=dict)
+    evidence: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class SkillQualificationRequest(BaseModel):
+    tool_code: str = Field(min_length=1)
+    test_code: str = Field(min_length=1)
+    target_file: str = Field(min_length=1)
+    timeout_seconds: int = Field(default=5, ge=1, le=60)
+    memory_limit_mb: int = Field(default=256, ge=64, le=4096)
+
+
+class SkillAdmissionRequest(BaseModel):
+    governance_proposal_id: str = Field(min_length=1)
+    actor: str = Field(min_length=1)
+    note: str = ''
+
+
+class SkillRetirementRequest(BaseModel):
+    governance_proposal_id: str = Field(min_length=1)
+    actor: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
+
+
+class EconomicMissionRequest(BaseModel):
+    wallet_id: str
+    task_intent: str = Field(min_length=1)
+    budget: str = Field(pattern=r'^\d+(\.\d{1,6})?$')
+    minimum_quality: float = Field(ge=0, le=1)
+    task_type: str = 'general'
+    required_model_id: str | None = None
+    model_requirements: list[str] = Field(default_factory=list)
+    resource_constraints: dict[str, Any] = Field(default_factory=dict)
+    quality_constraints: dict[str, Any] = Field(default_factory=dict)
+    execution_id: str | None = None
+    cpu_seconds: float = Field(default=0, ge=0)
+    peak_memory_bytes: int = Field(default=0, ge=0)
+    io_read_bytes: int = Field(default=0, ge=0)
+    io_write_bytes: int = Field(default=0, ge=0)
+    token_count: int = Field(default=0, ge=0)
+    wall_seconds: float = Field(default=0, ge=0)
+    outcome: str = Field(default='verified_success', pattern=r'^(verified_success|failed)$')
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+
+class DemoRunRequest(BaseModel):
+    capital: str = Field(default='10.00', pattern=r'^\d+(\.\d{1,6})?$')
+    minimum_liquidity: str = Field(default='1.00', pattern=r'^\d+(\.\d{1,6})?$')
+    budget: str = Field(default='1.00', pattern=r'^\d+(\.\d{1,6})?$')
+    minimum_quality: float = Field(default=0.8, ge=0, le=1)
+    task_intent: str = Field(default='Demo governed mission')
+    task_type: str = Field(default='general')
+    token_count: int = Field(default=420000, ge=0)
+
+
 def row_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
     return dict(row) if row else None
 
@@ -374,6 +458,37 @@ def require_wallet(db: sqlite3.Connection, wallet_id: str) -> sqlite3.Row:
     if not wallet:
         raise HTTPException(404, 'wallet not found')
     return wallet
+
+
+def require_skill(db: sqlite3.Connection, skill_id: str) -> sqlite3.Row:
+    skill = db.execute('SELECT * FROM skills WHERE skill_id = ?', (skill_id,)).fetchone()
+    if not skill:
+        raise HTTPException(404, 'skill not found')
+    return skill
+
+
+def decode_json_fields(entry: dict[str, Any], *fields: str) -> dict[str, Any]:
+    decoded = dict(entry)
+    for field in fields:
+        if field in decoded and isinstance(decoded[field], str):
+            try:
+                decoded[field] = json.loads(decoded[field])
+            except json.JSONDecodeError:
+                pass
+    return decoded
+
+
+def append_skill_event(db: sqlite3.Connection, skill_id: str, event_type: str, payload: dict[str, Any], governance_proof: str | None = None) -> None:
+    db.execute('INSERT INTO skill_events VALUES (?, ?, ?, ?, ?, ?)', (f'skill_event_{uuid.uuid4().hex[:18]}', skill_id, event_type, json.dumps(payload, sort_keys=True), governance_proof, now()))
+
+
+def require_human_governance_proof(db: sqlite3.Connection, proposal_id: str) -> sqlite3.Row:
+    proposal = db.execute('SELECT * FROM pocket_proposals WHERE proposal_id = ?', (proposal_id,)).fetchone()
+    if not proposal:
+        raise HTTPException(422, 'governance proposal not found')
+    if proposal['status'] not in {'USER_APPROVED_PENDING_EXTERNAL_PURCHASE', 'TRIAL_EXTENDED', 'REJECTED'}:
+        raise HTTPException(409, 'governance proposal is not human-ratified')
+    return proposal
 
 
 @app.get('/health')
@@ -646,6 +761,277 @@ def get_ledger(wallet_id: str) -> list[dict[str, Any]]:
     with closing(connect()) as db:
         require_wallet(db, wallet_id)
         return [row_dict(row) or {} for row in db.execute('SELECT * FROM ledger WHERE wallet_id = ? ORDER BY created_at ASC', (wallet_id,)).fetchall()]
+
+
+@app.get('/', response_class=HTMLResponse)
+@app.get('/console', response_class=HTMLResponse)
+def control_console() -> str:
+    console_path = BASE_DIR / 'app' / 'static' / 'control_console.html'
+    if not console_path.exists():
+        raise HTTPException(500, 'control console asset missing')
+    return console_path.read_text(encoding='utf-8')
+
+
+@app.get('/wallets')
+def list_wallets() -> list[dict[str, Any]]:
+    with closing(connect()) as db:
+        return [row_dict(row) or {} for row in db.execute('SELECT * FROM wallets ORDER BY created_at DESC').fetchall()]
+
+
+@app.get('/missions')
+def list_missions() -> list[dict[str, Any]]:
+    with closing(connect()) as db:
+        return [row_dict(row) or {} for row in db.execute('SELECT * FROM missions ORDER BY created_at DESC').fetchall()]
+
+
+@app.get('/routing-decisions')
+def list_routing_decisions() -> list[dict[str, Any]]:
+    with closing(connect()) as db:
+        rows = db.execute('SELECT * FROM routing_decisions ORDER BY created_at DESC').fetchall()
+        return [decode_json_fields(row_dict(row) or {}, 'decision', 'alternatives') for row in rows]
+
+
+@app.get('/reservations')
+def list_reservations() -> list[dict[str, Any]]:
+    with closing(connect()) as db:
+        return [row_dict(row) or {} for row in db.execute('SELECT * FROM reservations ORDER BY created_at DESC').fetchall()]
+
+
+@app.get('/executions')
+def list_executions() -> list[dict[str, Any]]:
+    with closing(connect()) as db:
+        rows = db.execute('SELECT * FROM executions ORDER BY created_at DESC').fetchall()
+        return [decode_json_fields(row_dict(row) or {}, 'usage', 'evidence') for row in rows]
+
+
+@app.get('/settlements')
+def list_settlements() -> list[dict[str, Any]]:
+    with closing(connect()) as db:
+        return [row_dict(row) or {} for row in db.execute('SELECT * FROM settlements ORDER BY created_at DESC').fetchall()]
+
+
+@app.post('/skills/candidates', status_code=201)
+def create_skill_candidate(payload: SkillCandidateCreate) -> dict[str, Any]:
+    skill_id = f'skill_{uuid.uuid4().hex[:12]}'
+    created = now()
+    with closing(connect()) as db:
+        db.execute(
+            'INSERT INTO skills VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            (
+                skill_id,
+                payload.name,
+                payload.description,
+                payload.status,
+                json.dumps(payload.metadata, sort_keys=True),
+                json.dumps(payload.lineage, sort_keys=True),
+                json.dumps(payload.provenance, sort_keys=True),
+                json.dumps(payload.evidence, sort_keys=True),
+                created,
+                created,
+            ),
+        )
+        append_skill_event(db, skill_id, 'SKILL_REGISTERED', payload.model_dump())
+        db.commit()
+        skill = row_dict(db.execute('SELECT * FROM skills WHERE skill_id = ?', (skill_id,)).fetchone()) or {}
+        return decode_json_fields(skill, 'metadata', 'lineage', 'provenance', 'evidence')
+
+
+@app.get('/skills')
+def list_skills(status: str | None = None) -> list[dict[str, Any]]:
+    with closing(connect()) as db:
+        if status:
+            rows = db.execute('SELECT * FROM skills WHERE status = ? ORDER BY updated_at DESC', (status,)).fetchall()
+        else:
+            rows = db.execute('SELECT * FROM skills ORDER BY updated_at DESC').fetchall()
+        return [decode_json_fields(row_dict(row) or {}, 'metadata', 'lineage', 'provenance', 'evidence') for row in rows]
+
+
+@app.get('/skills/{skill_id}')
+def get_skill(skill_id: str) -> dict[str, Any]:
+    with closing(connect()) as db:
+        skill = decode_json_fields(row_dict(require_skill(db, skill_id)) or {}, 'metadata', 'lineage', 'provenance', 'evidence')
+        events = db.execute('SELECT * FROM skill_events WHERE skill_id = ? ORDER BY created_at ASC', (skill_id,)).fetchall()
+        skill['events'] = [decode_json_fields(row_dict(event) or {}, 'payload') for event in events]
+        return skill
+
+
+@app.post('/skills/{skill_id}/qualify')
+def qualify_skill(skill_id: str, payload: SkillQualificationRequest) -> dict[str, Any]:
+    with closing(connect()) as db:
+        skill = require_skill(db, skill_id)
+        if skill['status'] not in {'candidate', 'discovered'}:
+            raise HTTPException(409, f'skill cannot be qualified from status {skill["status"]}')
+        evaluation = FACTORY_PIPELINE.execute_pipeline(
+            FactoryPipelineRequest(
+                tool_code=payload.tool_code,
+                test_code=payload.test_code,
+                target_file=payload.target_file,
+                timeout_seconds=payload.timeout_seconds,
+                memory_limit_mb=payload.memory_limit_mb,
+            )
+        )
+        evidence = json.loads(skill['evidence'])
+        evidence.append(
+            {
+                'evaluation_status': evaluation.status,
+                'patch_hash': evaluation.patch_hash,
+                'ast_report': evaluation.ast_report,
+                'sandbox_report': evaluation.sandbox_report,
+                'ledger_hash': evaluation.ledger_hash,
+                'timestamp': evaluation.timestamp,
+            }
+        )
+        next_status = 'qualified' if evaluation.status == 'PROMOTED' else skill['status']
+        db.execute('UPDATE skills SET status = ?, evidence = ?, updated_at = ? WHERE skill_id = ?', (next_status, json.dumps(evidence, sort_keys=True), now(), skill_id))
+        append_skill_event(
+            db,
+            skill_id,
+            'SKILL_QUALIFIED' if next_status == 'qualified' else 'SKILL_EVALUATED_REJECTED',
+            {'result': evaluation.model_dump()},
+        )
+        db.commit()
+        updated = row_dict(db.execute('SELECT * FROM skills WHERE skill_id = ?', (skill_id,)).fetchone()) or {}
+        return decode_json_fields(updated, 'metadata', 'lineage', 'provenance', 'evidence')
+
+
+@app.post('/skills/{skill_id}/admit')
+def admit_skill(skill_id: str, payload: SkillAdmissionRequest) -> dict[str, Any]:
+    with closing(connect()) as db:
+        skill = require_skill(db, skill_id)
+        if skill['status'] != 'qualified':
+            raise HTTPException(409, 'only a qualified skill can be admitted')
+        proposal = require_human_governance_proof(db, payload.governance_proposal_id)
+        if proposal['status'] != 'USER_APPROVED_PENDING_EXTERNAL_PURCHASE':
+            raise HTTPException(409, 'skill admission requires approved governance proof')
+        db.execute('UPDATE skills SET status = ?, updated_at = ? WHERE skill_id = ?', ('admitted', now(), skill_id))
+        append_skill_event(db, skill_id, 'SKILL_ADMITTED', {'actor': payload.actor, 'note': payload.note}, payload.governance_proposal_id)
+        db.commit()
+        updated = row_dict(db.execute('SELECT * FROM skills WHERE skill_id = ?', (skill_id,)).fetchone()) or {}
+        return decode_json_fields(updated, 'metadata', 'lineage', 'provenance', 'evidence')
+
+
+@app.post('/skills/{skill_id}/retire')
+def retire_skill(skill_id: str, payload: SkillRetirementRequest) -> dict[str, Any]:
+    with closing(connect()) as db:
+        skill = require_skill(db, skill_id)
+        if skill['status'] not in {'admitted', 'qualified'}:
+            raise HTTPException(409, f'skill cannot be retired from status {skill["status"]}')
+        require_human_governance_proof(db, payload.governance_proposal_id)
+        db.execute('UPDATE skills SET status = ?, updated_at = ? WHERE skill_id = ?', ('retired', now(), skill_id))
+        append_skill_event(db, skill_id, 'SKILL_RETIRED', {'actor': payload.actor, 'reason': payload.reason}, payload.governance_proposal_id)
+        db.commit()
+        updated = row_dict(db.execute('SELECT * FROM skills WHERE skill_id = ?', (skill_id,)).fetchone()) or {}
+        return decode_json_fields(updated, 'metadata', 'lineage', 'provenance', 'evidence')
+
+
+@app.post('/console/missions/execute', status_code=201)
+def create_and_execute_mission(payload: EconomicMissionRequest) -> dict[str, Any]:
+    mission = create_mission(
+        MissionCreate(
+            wallet_id=payload.wallet_id,
+            description=payload.task_intent,
+            max_cost=payload.budget,
+            minimum_quality=payload.minimum_quality,
+            task_type=payload.task_type,
+        )
+    )
+    decision = decide_route(mission['id'])
+    execution_evidence = {
+        'model_requirements': payload.model_requirements,
+        'resource_constraints': payload.resource_constraints,
+        'quality_constraints': payload.quality_constraints,
+        **payload.evidence,
+    }
+    if decision['status'] == 'HOLD':
+        return {
+            'mission': mission,
+            'routing': decision,
+            'status': 'HOLD',
+            'reason': decision.get('reason'),
+            'evidence': execution_evidence,
+        }
+    selected_model = decision.get('selected_model')
+    if payload.required_model_id and payload.required_model_id != selected_model:
+        return {
+            'mission': mission,
+            'routing': decision,
+            'status': 'HOLD',
+            'reason': 'ROUTED_MODEL_DOES_NOT_MATCH_REQUIRED_MODEL',
+            'required_model_id': payload.required_model_id,
+            'selected_model': selected_model,
+            'evidence': execution_evidence,
+        }
+    execution = execute(
+        ExecuteRequest(
+            mission_id=mission['id'],
+            model_id=payload.required_model_id or selected_model,
+            execution_id=payload.execution_id or f'exec_{uuid.uuid4().hex[:14]}',
+            cpu_seconds=payload.cpu_seconds,
+            peak_memory_bytes=payload.peak_memory_bytes,
+            io_read_bytes=payload.io_read_bytes,
+            io_write_bytes=payload.io_write_bytes,
+            token_count=payload.token_count,
+            wall_seconds=payload.wall_seconds,
+            outcome=payload.outcome,
+            evidence=execution_evidence,
+        )
+    )
+    return {'mission': mission, 'routing': decision, 'execution': execution, 'status': execution['outcome']}
+
+
+@app.post('/console/demo/run', status_code=201)
+def run_demo(payload: DemoRunRequest) -> dict[str, Any]:
+    wallet = create_wallet(WalletCreate(capital=payload.capital, minimum_liquidity=payload.minimum_liquidity))
+    model = register_model(
+        ModelCreate(
+            name='Demo Model',
+            task_types=[payload.task_type],
+            quality=0.95,
+            reliability=0.95,
+            cost_per_task='0.50',
+            latency_ms=800,
+        )
+    )
+    run = create_and_execute_mission(
+        EconomicMissionRequest(
+            wallet_id=wallet['id'],
+            task_intent=payload.task_intent,
+            budget=payload.budget,
+            minimum_quality=payload.minimum_quality,
+            task_type=payload.task_type,
+            required_model_id=model['id'],
+            token_count=payload.token_count,
+            evidence={'mode': 'demo_simulation'},
+        )
+    )
+    return {'wallet': wallet, 'model': model, 'run': run}
+
+
+@app.get('/console/observability')
+def console_observability() -> dict[str, Any]:
+    with closing(connect()) as db:
+        wallets = [row_dict(row) or {} for row in db.execute('SELECT * FROM wallets ORDER BY created_at DESC').fetchall()]
+        missions = [row_dict(row) or {} for row in db.execute('SELECT * FROM missions ORDER BY created_at DESC').fetchall()]
+        decisions = [decode_json_fields(row_dict(row) or {}, 'decision', 'alternatives') for row in db.execute('SELECT * FROM routing_decisions ORDER BY created_at DESC').fetchall()]
+        reservations = [row_dict(row) or {} for row in db.execute('SELECT * FROM reservations ORDER BY created_at DESC').fetchall()]
+        executions = [decode_json_fields(row_dict(row) or {}, 'usage', 'evidence') for row in db.execute('SELECT * FROM executions ORDER BY created_at DESC').fetchall()]
+        settlements = [row_dict(row) or {} for row in db.execute('SELECT * FROM settlements ORDER BY created_at DESC').fetchall()]
+        ledger_rows = [decode_json_fields(row_dict(row) or {}, 'metadata') for row in db.execute('SELECT * FROM ledger ORDER BY created_at DESC').fetchall()]
+        skill_rows = [decode_json_fields(row_dict(row) or {}, 'metadata', 'lineage', 'provenance', 'evidence') for row in db.execute('SELECT * FROM skills ORDER BY updated_at DESC').fetchall()]
+        skill_events = [decode_json_fields(row_dict(row) or {}, 'payload') for row in db.execute('SELECT * FROM skill_events ORDER BY created_at DESC').fetchall()]
+        pocket_events = [decode_json_fields(row_dict(row) or {}, 'payload') for row in db.execute('SELECT * FROM pocket_events ORDER BY sequence DESC').fetchall()]
+        return {
+            'wallets': wallets,
+            'missions': missions,
+            'routing_decisions': decisions,
+            'reservations': reservations,
+            'executions': executions,
+            'settlements': settlements,
+            'ledger': ledger_rows,
+            'skills': skill_rows,
+            'skill_events': skill_events,
+            'pocket_events': pocket_events,
+        }
 
 
 @app.post('/micro/wallets/{agent_id}/fund')

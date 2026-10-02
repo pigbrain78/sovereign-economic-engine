@@ -63,8 +63,38 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 Open the interactive API at `http://localhost:8000/docs`.
+Open the lightweight control console at `http://localhost:8000/console`.
 
 SQLite files are created at `sovereign.db` and `sovereign-memory.db`. Override them with `SOVEREIGN_DB` and `SOVEREIGN_MEMORY_DB`.
+
+## AI Economic Control Console (MVP)
+
+The console is a thin control/observation layer over existing engine primitives, not a replacement governance layer.
+
+- UI routes:
+  - `GET /`
+  - `GET /console`
+- Observability snapshot:
+  - `GET /console/observability`
+- Demo lifecycle run:
+  - `POST /console/demo/run`
+- Skill Factory lifecycle:
+  - `POST /skills/candidates`
+  - `GET /skills`
+  - `GET /skills/{skill_id}`
+  - `POST /skills/{skill_id}/qualify`
+  - `POST /skills/{skill_id}/admit`
+  - `POST /skills/{skill_id}/retire`
+- Economic orchestration:
+  - `POST /console/missions/execute`
+
+Governance invariants are preserved:
+
+```text
+NO VALID GOVERNANCE PROOF
+→ NO STATE TRANSITION
+→ NO EXECUTION AUTHORIZATION
+```
 
 ## Core economic flow
 
