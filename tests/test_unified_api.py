@@ -1,8 +1,6 @@
 import os
 from pathlib import Path
 
-from fastapi.testclient import TestClient
-
 os.environ['SOVEREIGN_DB'] = '/tmp/sovereign-unified-api.db'
 os.environ['SOVEREIGN_MEMORY_DB'] = '/tmp/sovereign-unified-memory.db'
 for path in ('/tmp/sovereign-unified-api.db', '/tmp/sovereign-unified-memory.db'):
@@ -10,10 +8,8 @@ for path in ('/tmp/sovereign-unified-api.db', '/tmp/sovereign-unified-memory.db'
 
 from app.main import app  # noqa: E402
 
-client = TestClient(app)
 
-
-def test_unified_micro_billing_and_memory_flow():
+def test_unified_micro_billing_and_memory_flow(client):
     funded = client.post('/micro/wallets/payer/fund', json={'amount_micro_cents': 1000})
     assert funded.status_code == 200
     assert funded.json()['balance_micro_cents'] == 1000

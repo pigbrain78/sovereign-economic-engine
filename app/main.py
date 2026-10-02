@@ -4,7 +4,7 @@ import json
 import hashlib
 import sqlite3
 import uuid
-from contextlib import closing
+from contextlib import asynccontextmanager, closing
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -19,7 +19,13 @@ from app.micro_billing import MetricType, SplitRevenueContract, SplitRule, Synap
 BASE_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = Path(__import__('os').environ.get('SOVEREIGN_DB', BASE_DIR / 'sovereign.db'))
 
-app = FastAPI(title='Sovereign Economic Engine', version='0.1.0')
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    init_db()
+    yield
+
+
+app = FastAPI(title='Sovereign Economic Engine', version='0.1.0', lifespan=lifespan)
 MICRO_BILLING = SynapseMicroBillingEngine()
 MEMORY = MemoryAPI(__import__('os').environ.get('SOVEREIGN_MEMORY_DB', BASE_DIR / 'sovereign-memory.db'))
 
@@ -190,11 +196,6 @@ def init_db() -> None:
         if 'task_type' not in mission_columns:
             db.execute("ALTER TABLE missions ADD COLUMN task_type TEXT NOT NULL DEFAULT 'general'")
         db.commit()
-
-
-@app.on_event('startup')
-def startup() -> None:
-    init_db()
 
 
 class WalletCreate(BaseModel):
@@ -749,6 +750,3 @@ def memory_retract(memory_id: str, payload: MemoryRetractRequest) -> dict[str, A
         return MEMORY.retract(memory_id, payload.reason, payload.actor)
     except KeyError as exc:
         raise HTTPException(404, 'memory not found') from exc
-
-
-init_db()

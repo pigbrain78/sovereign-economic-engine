@@ -1,9 +1,6 @@
 import os
 from pathlib import Path
 
-import pytest
-from fastapi.testclient import TestClient
-
 DB = Path('/tmp/sovereign-economic-engine-test.db')
 if DB.exists():
     DB.unlink()
@@ -11,10 +8,8 @@ os.environ['SOVEREIGN_DB'] = str(DB)
 
 from app.main import app  # noqa: E402
 
-client = TestClient(app)
 
-
-def test_end_to_end_wallet_route_and_settlement():
+def test_end_to_end_wallet_route_and_settlement(client):
     wallet = client.post('/wallets', json={'capital': '10.00', 'minimum_liquidity': '2.00'}).json()
     model = client.post('/models', json={
         'id': 'cheap-reliable', 'name': 'Cheap Reliable', 'task_types': ['research'],
@@ -51,7 +46,7 @@ def test_end_to_end_wallet_route_and_settlement():
     assert [event['event'] for event in ledger] == ['deposit', 'reserve', 'outcome', 'release']
 
 
-def test_route_holds_when_no_model_meets_quality_and_cost():
+def test_route_holds_when_no_model_meets_quality_and_cost(client):
     wallet = client.post('/wallets', json={'capital': '10.00'}).json()
     client.post('/models', json={
         'id': 'expensive-model', 'name': 'Expensive', 'task_types': ['general'],
@@ -66,7 +61,7 @@ def test_route_holds_when_no_model_meets_quality_and_cost():
     assert decision['reason'] == 'NO_QUALIFIED_MODEL_WITHIN_ECONOMIC_ENVELOPE'
 
 
-def test_execution_fails_closed_on_minimum_liquidity():
+def test_execution_fails_closed_on_minimum_liquidity(client):
     wallet = client.post('/wallets', json={'capital': '1.00', 'minimum_liquidity': '0.90'}).json()
     model = client.post('/models', json={
         'id': 'liquidity-model', 'name': 'Liquidity', 'task_types': ['general'],

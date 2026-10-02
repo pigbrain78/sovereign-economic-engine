@@ -1,11 +1,7 @@
-from fastapi.testclient import TestClient
-
 from app.main import app
 
-client = TestClient(app)
 
-
-def test_pocket_builder_proposal_requires_evidence_and_human_decision():
+def test_pocket_builder_proposal_requires_evidence_and_human_decision(client):
     project = client.post('/pocket/projects', json={
         'name': 'Pocket OS Treasury',
         'description': 'Improve the economic engine with evidence-backed tools.',
@@ -72,7 +68,7 @@ def test_pocket_builder_proposal_requires_evidence_and_human_decision():
     assert 'does not purchase' in approved.json()['note']
 
 
-def test_shadow_cannot_approve_or_execute():
+def test_shadow_cannot_approve_or_execute(client):
     project = client.post('/pocket/projects', json={'name': 'Shadow boundary test', 'description': 'Verify advisory authority boundaries.'}).json()
     shadow = client.post(f"/pocket/projects/{project['project_id']}/shadow", json={
         'kind': 'recommendation', 'content': 'Try a local benchmark.', 'confidence': 0.5,
