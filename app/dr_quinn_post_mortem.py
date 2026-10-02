@@ -98,3 +98,8 @@ class DrQuinnPostMortem:
                 archive.write(json.dumps(entry) + "\n")
         self.failed_log.write_text("", encoding="utf-8")
         return len(failed_entries)
+
+
+def run_post_mortem_sweep(logs_dir: str = "./sovereign_logs", memory_dir: str = "./sovereign_memory") -> int:
+    """Module-level entrypoint for automation loops."""
+    return DrQuinnPostMortem(logs_dir=logs_dir, memory_dir=memory_dir).run_post_mortem_sweep()
