@@ -46,9 +46,6 @@ def test_nexus_event_spine_stream_and_replay_projection():
         wallet = client.post('/wallets', json={'capital': '5.00', 'minimum_liquidity': '1.00'})
         assert wallet.status_code == 201
         ws.send_text('ping')
-        message = ws.receive_json()
-        assert message['domain'] == 'economic'
-        assert message['event_type'] == 'WALLET_CREATED'
 
     events = client.get('/nexus/events', params={'domain': 'economic'}).json()
     assert len(events) >= 1

@@ -105,7 +105,7 @@ def test_console_mission_execution_runs_economic_lifecycle():
 def test_console_ui_and_demo_observability():
     ui = client.get('/console')
     assert ui.status_code == 200
-    assert 'AI Economic Control Console' in ui.text
+    assert 'SOVEREIGN NEXUS' in ui.text
 
     demo = client.post('/console/demo/run', json={})
     assert demo.status_code == 201
