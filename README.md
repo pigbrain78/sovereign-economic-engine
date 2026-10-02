@@ -63,8 +63,68 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 Open the interactive API at `http://localhost:8000/docs`.
+Open the lightweight control console at `http://localhost:8000/console`.
 
 SQLite files are created at `sovereign.db` and `sovereign-memory.db`. Override them with `SOVEREIGN_DB` and `SOVEREIGN_MEMORY_DB`.
+
+## AI Economic Control Console (MVP)
+
+The console is a thin control/observation layer over existing engine primitives, not a replacement governance layer.
+
+- UI routes:
+  - `GET /`
+  - `GET /console`
+- Observability snapshot:
+  - `GET /console/observability`
+- Demo lifecycle run:
+  - `POST /console/demo/run`
+- Skill Factory lifecycle:
+  - `POST /skills/candidates`
+  - `GET /skills`
+  - `GET /skills/{skill_id}`
+  - `POST /skills/{skill_id}/qualify`
+  - `POST /skills/{skill_id}/admit`
+  - `POST /skills/{skill_id}/retire`
+- Economic orchestration:
+  - `POST /console/missions/execute`
+
+Governance invariants are preserved:
+
+```text
+NO VALID GOVERNANCE PROOF
+→ NO STATE TRANSITION
+→ NO EXECUTION AUTHORIZATION
+```
+
+## Sovereign Nexus Hypervisor APIs (incremental)
+
+Nexus extends the same FastAPI backend as the authoritative control plane:
+
+- Domain contract and event spine:
+  - `GET /nexus/domain-contract`
+  - `POST /nexus/events`
+  - `GET /nexus/events`
+  - `WS /nexus/stream`
+- Governance action queue ("Sovereign Gavel"):
+  - `POST /nexus/gavel/actions`
+  - `GET /nexus/gavel/actions`
+  - `POST /nexus/gavel/actions/{action_id}/decision`
+  - `POST /nexus/gavel/actions/{action_id}/execute`
+- Replay court:
+  - `GET /nexus/replay/timeline`
+  - `POST /nexus/replay/projection`
+  - `POST /nexus/replay/rollback-commands`
+- Graph and market views:
+  - `GET /nexus/graph`
+  - `GET /nexus/shadow/market`
+  - `POST /nexus/shadow/opportunities`
+  - `POST /nexus/shadow/swarm-requests`
+- Mesh survivability queue:
+  - `POST /nexus/mesh/outbound`
+  - `POST /nexus/mesh/outbound/{queue_id}/reconcile`
+  - `GET /nexus/mesh/outbound`
+
+Rollback commands are governed audit commands only; they do not mutate historical records directly.
 
 ## Core economic flow
 
