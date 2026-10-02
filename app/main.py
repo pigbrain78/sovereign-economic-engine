@@ -10,7 +10,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from app.software_factory_pipeline import FactoryPipelineRequest, SoftwareFactoryPipeline
@@ -212,6 +212,85 @@ def init_db() -> None:
             governance_proof TEXT,
             created_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS nexus_events (
+            block_height INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id TEXT NOT NULL UNIQUE,
+            domain TEXT NOT NULL,
+            entity_type TEXT NOT NULL,
+            entity_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            evidence TEXT NOT NULL,
+            previous_hash TEXT NOT NULL,
+            event_hash TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS nexus_gavel_actions (
+            action_id TEXT PRIMARY KEY,
+            action_type TEXT NOT NULL,
+            entity_ref TEXT NOT NULL,
+            confidence REAL NOT NULL,
+            estimated_cost TEXT NOT NULL,
+            risk_level TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            requires_human INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            signed_lease TEXT,
+            lease_nonce TEXT,
+            lease_expires_at TEXT,
+            decision_actor TEXT,
+            decision_note TEXT,
+            created_at TEXT NOT NULL,
+            decided_at TEXT,
+            executed_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS nexus_lease_nonces (
+            nonce TEXT PRIMARY KEY,
+            action_id TEXT NOT NULL REFERENCES nexus_gavel_actions(action_id),
+            consumed_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS nexus_rollback_commands (
+            rollback_id TEXT PRIMARY KEY,
+            target_block_height INTEGER NOT NULL,
+            governance_proposal_id TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS nexus_shadow_opportunities (
+            opportunity_id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            domain TEXT NOT NULL,
+            expected_roi REAL NOT NULL,
+            evidence TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS nexus_swarm_requests (
+            request_id TEXT PRIMARY KEY,
+            opportunity_id TEXT NOT NULL REFERENCES nexus_shadow_opportunities(opportunity_id),
+            wallet_id TEXT NOT NULL REFERENCES wallets(id),
+            budget TEXT NOT NULL,
+            target_roi REAL NOT NULL,
+            governance_proposal_id TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS nexus_mesh_outbound_queue (
+            queue_id TEXT PRIMARY KEY,
+            partition_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            local_merkle_root TEXT NOT NULL,
+            remote_merkle_root TEXT,
+            status TEXT NOT NULL,
+            conflict_note TEXT,
+            created_at TEXT NOT NULL,
+            reconciled_at TEXT
+        );
         ''')
         mission_columns = {row['name'] for row in db.execute('PRAGMA table_info(missions)').fetchall()}
         if 'task_type' not in mission_columns:
@@ -412,6 +491,97 @@ class DemoRunRequest(BaseModel):
     token_count: int = Field(default=420000, ge=0)
 
 
+class NexusEvidence(BaseModel):
+    source: str = Field(min_length=1)
+    checksum: str | None = None
+    attributes: dict[str, Any] = Field(default_factory=dict)
+
+
+class NexusDomainContract(BaseModel):
+    mission: dict[str, Any]
+    decision: dict[str, Any]
+    reservation: dict[str, Any]
+    execution: dict[str, Any]
+    settlement: dict[str, Any]
+    skill_lifecycle: dict[str, Any]
+    governance_action: dict[str, Any]
+    evidence_record: dict[str, Any]
+
+
+class NexusEventCreate(BaseModel):
+    domain: str = Field(min_length=1)
+    entity_type: str = Field(min_length=1)
+    entity_id: str = Field(min_length=1)
+    event_type: str = Field(min_length=1)
+    payload: dict[str, Any] = Field(default_factory=dict)
+    evidence: list[NexusEvidence] = Field(default_factory=list)
+
+
+class GavelActionCreate(BaseModel):
+    action_type: str = Field(min_length=1)
+    entity_ref: str = Field(min_length=1)
+    confidence: float = Field(ge=0, le=1)
+    estimated_cost: str = Field(pattern=r'^\d+(\.\d{1,6})?$')
+    risk_level: str = Field(pattern=r'^(LOW|MEDIUM|HIGH|CRITICAL)$')
+    payload: dict[str, Any] = Field(default_factory=dict)
+    requires_human: bool = True
+
+
+class GavelActionDecision(BaseModel):
+    decision: str = Field(pattern=r'^(approve|reject)$')
+    actor: str = Field(min_length=1)
+    note: str = ''
+    signer_key_id: str | None = None
+    signature: str | None = None
+    nonce: str | None = None
+    lease_expires_at: str | None = None
+
+
+class GavelActionExecute(BaseModel):
+    actor: str = Field(min_length=1)
+
+
+class ReplayProjectionRequest(BaseModel):
+    block_height: int = Field(ge=1)
+
+
+class RollbackCommandRequest(BaseModel):
+    target_block_height: int = Field(ge=1)
+    governance_proposal_id: str = Field(min_length=1)
+    actor: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
+
+
+class ShadowOpportunityCreate(BaseModel):
+    title: str = Field(min_length=1)
+    summary: str = Field(min_length=1)
+    domain: str = Field(min_length=1)
+    expected_roi: float = Field(gt=0)
+    evidence: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class SwarmRequestCreate(BaseModel):
+    wallet_id: str
+    opportunity_id: str
+    budget: str = Field(pattern=r'^\d+(\.\d{1,6})?$')
+    target_roi: float = Field(gt=0)
+    governance_proposal_id: str = Field(min_length=1)
+    actor: str = Field(min_length=1)
+
+
+class MeshOutboundEnqueue(BaseModel):
+    partition_id: str = Field(min_length=1)
+    event_type: str = Field(min_length=1)
+    payload: dict[str, Any] = Field(default_factory=dict)
+    local_merkle_root: str = Field(min_length=8)
+
+
+class MeshReconcileRequest(BaseModel):
+    remote_merkle_root: str = Field(min_length=8)
+    conflict_note: str = ''
+    status: str = Field(pattern=r'^(MERGED|CONFLICT|DROPPED)$')
+
+
 def row_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
     return dict(row) if row else None
 
@@ -495,19 +665,156 @@ def require_human_governance_proof(db: sqlite3.Connection, proposal_id: str) -> 
     return proposal
 
 
+def _canonical_json(value: dict[str, Any]) -> str:
+    return json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False)
+
+
+class NexusStreamHub:
+    def __init__(self) -> None:
+        self.clients: dict[WebSocket, dict[str, str]] = {}
+
+    async def connect(self, websocket: WebSocket, filters: dict[str, str]) -> None:
+        await websocket.accept()
+        self.clients[websocket] = filters
+
+    def disconnect(self, websocket: WebSocket) -> None:
+        self.clients.pop(websocket, None)
+
+    async def publish(self, event: dict[str, Any]) -> None:
+        stale: list[WebSocket] = []
+        for websocket, filters in self.clients.items():
+            if filters.get('domain') and filters['domain'] != event['domain']:
+                continue
+            if filters.get('entity_id') and filters['entity_id'] != event['entity_id']:
+                continue
+            try:
+                await websocket.send_json(event)
+            except Exception:
+                stale.append(websocket)
+        for websocket in stale:
+            self.disconnect(websocket)
+
+
+NEXUS_STREAM = NexusStreamHub()
+
+
+def _append_nexus_event(db: sqlite3.Connection, payload: NexusEventCreate) -> dict[str, Any]:
+    previous = db.execute('SELECT block_height, event_hash FROM nexus_events ORDER BY block_height DESC LIMIT 1').fetchone()
+    previous_hash = previous['event_hash'] if previous else '0' * 64
+    created_at = now()
+    body = {
+        'domain': payload.domain,
+        'entity_type': payload.entity_type,
+        'entity_id': payload.entity_id,
+        'event_type': payload.event_type,
+        'payload': payload.payload,
+        'evidence': [item.model_dump() for item in payload.evidence],
+        'previous_hash': previous_hash,
+        'created_at': created_at,
+    }
+    event_hash = hashlib.sha256(_canonical_json(body).encode()).hexdigest()
+    event_id = hashlib.sha256(event_hash.encode()).hexdigest()[:32]
+    db.execute(
+        'INSERT INTO nexus_events(event_id,domain,entity_type,entity_id,event_type,payload,evidence,previous_hash,event_hash,created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        (
+            event_id,
+            payload.domain,
+            payload.entity_type,
+            payload.entity_id,
+            payload.event_type,
+            _canonical_json(payload.payload),
+            _canonical_json({'items': [item.model_dump() for item in payload.evidence]}),
+            previous_hash,
+            event_hash,
+            created_at,
+        ),
+    )
+    row = db.execute('SELECT * FROM nexus_events WHERE event_id = ?', (event_id,)).fetchone()
+    event = row_dict(row) or {}
+    return decode_json_fields(event, 'payload', 'evidence')
+
+
+def _emit_nexus_event(
+    db: sqlite3.Connection,
+    *,
+    domain: str,
+    entity_type: str,
+    entity_id: str,
+    event_type: str,
+    payload: dict[str, Any],
+    evidence: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    record = _append_nexus_event(
+        db,
+        NexusEventCreate(
+            domain=domain,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            event_type=event_type,
+            payload=payload,
+            evidence=[NexusEvidence(**item) for item in (evidence or [])],
+        ),
+    )
+    return record
+
+
+def _publish_nexus_event_if_possible(event: dict[str, Any]) -> None:
+    import asyncio
+
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(NEXUS_STREAM.publish(event))
+    except RuntimeError:
+        return
+
+
+def _verify_nexus_event_chain(db: sqlite3.Connection) -> bool:
+    previous_hash = '0' * 64
+    last_height = 0
+    for row in db.execute('SELECT * FROM nexus_events ORDER BY block_height ASC').fetchall():
+        if row['previous_hash'] != previous_hash:
+            return False
+        body = {
+            'domain': row['domain'],
+            'entity_type': row['entity_type'],
+            'entity_id': row['entity_id'],
+            'event_type': row['event_type'],
+            'payload': json.loads(row['payload']),
+            'evidence': json.loads(row['evidence'])['items'],
+            'previous_hash': row['previous_hash'],
+            'created_at': row['created_at'],
+        }
+        expected = hashlib.sha256(_canonical_json(body).encode()).hexdigest()
+        if expected != row['event_hash']:
+            return False
+        previous_hash = row['event_hash']
+        last_height = row['block_height']
+    return last_height >= 0
+
+
+def _iso_is_future(timestamp: str) -> bool:
+    try:
+        value = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+    except ValueError:
+        return False
+    return value > datetime.now(timezone.utc)
+
+
 @app.get('/health')
 def health() -> dict[str, Any]:
     memory_health = MEMORY.health()
     with closing(connect()) as db:
         pocket_ledger_verified = verify_pocket_events(db)
+        nexus_event_verified = _verify_nexus_event_chain(db)
     return {
-        'status': 'ok' if memory_health['ledger_verified'] and pocket_ledger_verified else 'degraded',
+        'status': 'ok' if memory_health['ledger_verified'] and pocket_ledger_verified and nexus_event_verified else 'degraded',
         'service': 'sovereign-economic-engine',
         'components': {
             'economic_wallet': 'ready',
             'micro_billing': 'ready_in_process_memory',
             'memory': memory_health,
             'pocket_os': {'status': 'ok', 'event_ledger_verified': pocket_ledger_verified},
+            'nexus': {'status': 'ok' if nexus_event_verified else 'degraded', 'event_spine_verified': nexus_event_verified},
             'external_model_executor': 'not_connected',
         },
     }
@@ -584,7 +891,17 @@ def create_pocket_proposal(payload: ProposalCreate) -> dict[str, Any]:
             raise HTTPException(422, 'purchase recommendations require evidence')
         db.execute('INSERT INTO pocket_proposals (proposal_id, project_id, loop_id, shadow_id, agent_id, title, category, candidate, proposed_cost, recurring, access_level, expected_benefit, evidence, recommendation, status, authority, execution_authorized, created_at, approved_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', (proposal_id, payload.project_id, payload.loop_id, payload.shadow_id, payload.agent_id, payload.title, payload.category, json.dumps(payload.candidate, sort_keys=True), money_str(cost), int(payload.recurring), payload.access_level, json.dumps(payload.expected_benefit, sort_keys=True), json.dumps(payload.evidence, sort_keys=True), payload.recommendation, initial_status, 'NONE', 0, now(), None))
         pocket_event(db, 'PROPOSAL_CREATED', proposal_id, {'project_id': payload.project_id, 'agent_id': payload.agent_id, 'recommendation': payload.recommendation, 'status': initial_status, 'authority': 'NONE'})
+        event = _emit_nexus_event(
+            db,
+            domain='governance',
+            entity_type='proposal',
+            entity_id=proposal_id,
+            event_type='GOVERNANCE_PROPOSAL_CREATED',
+            payload={'project_id': payload.project_id, 'status': initial_status, 'recommendation': payload.recommendation, 'proposed_cost': money_str(cost)},
+            evidence=[{'source': 'pocket.proposal.create'}],
+        )
         db.commit()
+        _publish_nexus_event_if_possible(event)
         result = row_dict(db.execute('SELECT * FROM pocket_proposals WHERE proposal_id = ?', (proposal_id,)).fetchone()) or {}
         result['execution_authorized'] = False
         return result
@@ -616,7 +933,17 @@ def decide_pocket_proposal(proposal_id: str, payload: ProposalApproval) -> dict[
             status, authority, approved_at = 'TRIAL_EXTENDED', 'HUMAN_RATIFIED', None
         db.execute('UPDATE pocket_proposals SET status = ?, authority = ?, approved_at = ? WHERE proposal_id = ?', (status, authority, approved_at, proposal_id))
         pocket_event(db, 'PROPOSAL_DECIDED', proposal_id, {'decision': payload.decision, 'actor': payload.actor, 'status': status, 'execution_authorized': False})
+        event = _emit_nexus_event(
+            db,
+            domain='governance',
+            entity_type='proposal',
+            entity_id=proposal_id,
+            event_type='GOVERNANCE_PROPOSAL_DECIDED',
+            payload={'decision': payload.decision, 'actor': payload.actor, 'status': status},
+            evidence=[{'source': 'pocket.proposal.decision'}],
+        )
         db.commit()
+        _publish_nexus_event_if_possible(event)
         result = row_dict(db.execute('SELECT * FROM pocket_proposals WHERE proposal_id = ?', (proposal_id,)).fetchone()) or {}
         result['execution_authorized'] = False
         result['note'] = 'Approval records a human decision only; it does not purchase, reserve, or authorize execution.'
@@ -642,7 +969,17 @@ def create_wallet(payload: WalletCreate) -> dict[str, Any]:
     with closing(connect()) as db:
         db.execute('INSERT INTO wallets VALUES (?, ?, ?, ?, ?, ?, ?)', (wallet_id, money_str(capital), money_str(capital), '0.000000', '0.000000', money_str(minimum), now()))
         ledger(db, wallet_id, 'deposit', capital, metadata={'source': 'initial_capital'})
+        event = _emit_nexus_event(
+            db,
+            domain='economic',
+            entity_type='wallet',
+            entity_id=wallet_id,
+            event_type='WALLET_CREATED',
+            payload={'capital': money_str(capital), 'minimum_liquidity': money_str(minimum)},
+            evidence=[{'source': 'wallet.create'}],
+        )
         db.commit()
+        _publish_nexus_event_if_possible(event)
         return row_dict(db.execute('SELECT * FROM wallets WHERE id = ?', (wallet_id,)).fetchone()) or {}
 
 
@@ -682,7 +1019,17 @@ def create_mission(payload: MissionCreate) -> dict[str, Any]:
     with closing(connect()) as db:
         require_wallet(db, payload.wallet_id)
         db.execute('INSERT INTO missions (id, wallet_id, description, max_cost, minimum_quality, task_type, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', (mission_id, payload.wallet_id, payload.description, money_str(max_cost), payload.minimum_quality, payload.task_type, 'planned', now()))
+        event = _emit_nexus_event(
+            db,
+            domain='economic',
+            entity_type='mission',
+            entity_id=mission_id,
+            event_type='MISSION_CREATED',
+            payload={'wallet_id': payload.wallet_id, 'max_cost': money_str(max_cost), 'minimum_quality': payload.minimum_quality, 'task_type': payload.task_type},
+            evidence=[{'source': 'mission.create'}],
+        )
         db.commit()
+        _publish_nexus_event_if_possible(event)
         return row_dict(db.execute('SELECT * FROM missions WHERE id = ?', (mission_id,)).fetchone()) or {}
 
 
@@ -708,7 +1055,17 @@ def decide_route(mission_id: str) -> dict[str, Any]:
             decision = {'status': 'APPROVED', 'reason': 'MODEL_MEETS_QUALITY_AND_COST_CONSTRAINTS', 'selected_model': selected['id']}
         decision_id = f'decision_{uuid.uuid4().hex[:12]}'
         db.execute('INSERT INTO routing_decisions VALUES (?, ?, ?, ?, ?, ?)', (decision_id, mission_id, selected['id'] if selected else None, json.dumps(decision, sort_keys=True), json.dumps([{'model_id': item[1]['id'], 'cost': item[1]['cost_per_task'], 'quality': item[1]['quality']} for item in candidates[1:]], sort_keys=True), now()))
+        event = _emit_nexus_event(
+            db,
+            domain='economic',
+            entity_type='decision',
+            entity_id=decision_id,
+            event_type='ROUTING_DECIDED',
+            payload={'mission_id': mission_id, **decision},
+            evidence=[{'source': 'routing.decide'}],
+        )
         db.commit()
+        _publish_nexus_event_if_possible(event)
         return {'decision_id': decision_id, **decision, 'alternatives': json.loads(db.execute('SELECT alternatives FROM routing_decisions WHERE id = ?', (decision_id,)).fetchone()['alternatives'])}
 
 
@@ -755,7 +1112,26 @@ def execute(payload: ExecuteRequest) -> dict[str, Any]:
             ledger(db, wallet['id'], 'release', unused, mission_id=mission['id'], reservation_id=reservation_id, metadata={'execution_id': payload.execution_id})
         db.execute('UPDATE executions SET status = ? WHERE execution_id = ?', ('settled', payload.execution_id))
         db.execute('INSERT INTO settlements VALUES (?, ?, ?, ?, ?, ?, ?)', (settlement_id, payload.execution_id, wallet['id'], money_str(actual), previous_hash, event_hash, now()))
+        event = _emit_nexus_event(
+            db,
+            domain='economic',
+            entity_type='execution',
+            entity_id=payload.execution_id,
+            event_type='EXECUTION_SETTLED',
+            payload={
+                'mission_id': mission['id'],
+                'model_id': model['id'],
+                'reservation_id': reservation_id,
+                'settlement_id': settlement_id,
+                'outcome': payload.outcome,
+                'actual_cost': money_str(actual),
+                'unused_reservation_release': money_str(unused),
+                'usage': usage.as_dict(),
+            },
+            evidence=[{'source': 'execution.settle', 'attributes': {'pricing_policy': 'measured_usage'}}],
+        )
         db.commit()
+        _publish_nexus_event_if_possible(event)
         result = row_dict(db.execute('SELECT * FROM wallets WHERE id = ?', (wallet['id'],)).fetchone()) or {}
         return {'execution_id': payload.execution_id, 'settlement_id': settlement_id, 'mission_id': mission['id'], 'reservation_id': reservation_id, 'outcome': payload.outcome, 'usage': usage.as_dict(), 'amount': money_str(actual), 'wallet': result}
 
@@ -835,7 +1211,17 @@ def create_skill_candidate(payload: SkillCandidateCreate) -> dict[str, Any]:
             ),
         )
         append_skill_event(db, skill_id, 'SKILL_REGISTERED', payload.model_dump())
+        event = _emit_nexus_event(
+            db,
+            domain='skills',
+            entity_type='skill',
+            entity_id=skill_id,
+            event_type='SKILL_REGISTERED',
+            payload=payload.model_dump(),
+            evidence=[{'source': 'skills.candidate.create'}],
+        )
         db.commit()
+        _publish_nexus_event_if_possible(event)
         skill = row_dict(db.execute('SELECT * FROM skills WHERE skill_id = ?', (skill_id,)).fetchone()) or {}
         return decode_json_fields(skill, 'metadata', 'lineage', 'provenance', 'evidence')
 
@@ -893,7 +1279,17 @@ def qualify_skill(skill_id: str, payload: SkillQualificationRequest) -> dict[str
             'SKILL_QUALIFIED' if next_status == 'qualified' else 'SKILL_EVALUATED_REJECTED',
             {'result': evaluation.model_dump()},
         )
+        event = _emit_nexus_event(
+            db,
+            domain='skills',
+            entity_type='skill',
+            entity_id=skill_id,
+            event_type='SKILL_QUALIFIED' if next_status == 'qualified' else 'SKILL_REJECTED',
+            payload={'evaluation': evaluation.model_dump(), 'status': next_status},
+            evidence=[{'source': 'skills.qualify', 'checksum': evaluation.patch_hash}],
+        )
         db.commit()
+        _publish_nexus_event_if_possible(event)
         updated = row_dict(db.execute('SELECT * FROM skills WHERE skill_id = ?', (skill_id,)).fetchone()) or {}
         return decode_json_fields(updated, 'metadata', 'lineage', 'provenance', 'evidence')
 
@@ -909,7 +1305,17 @@ def admit_skill(skill_id: str, payload: SkillAdmissionRequest) -> dict[str, Any]
             raise HTTPException(409, 'skill admission requires approved governance proof')
         db.execute('UPDATE skills SET status = ?, updated_at = ? WHERE skill_id = ?', ('admitted', now(), skill_id))
         append_skill_event(db, skill_id, 'SKILL_ADMITTED', {'actor': payload.actor, 'note': payload.note}, payload.governance_proposal_id)
+        event = _emit_nexus_event(
+            db,
+            domain='skills',
+            entity_type='skill',
+            entity_id=skill_id,
+            event_type='SKILL_ADMITTED',
+            payload={'actor': payload.actor, 'governance_proposal_id': payload.governance_proposal_id},
+            evidence=[{'source': 'skills.admit', 'attributes': {'note': payload.note}}],
+        )
         db.commit()
+        _publish_nexus_event_if_possible(event)
         updated = row_dict(db.execute('SELECT * FROM skills WHERE skill_id = ?', (skill_id,)).fetchone()) or {}
         return decode_json_fields(updated, 'metadata', 'lineage', 'provenance', 'evidence')
 
@@ -923,7 +1329,17 @@ def retire_skill(skill_id: str, payload: SkillRetirementRequest) -> dict[str, An
         require_human_governance_proof(db, payload.governance_proposal_id)
         db.execute('UPDATE skills SET status = ?, updated_at = ? WHERE skill_id = ?', ('retired', now(), skill_id))
         append_skill_event(db, skill_id, 'SKILL_RETIRED', {'actor': payload.actor, 'reason': payload.reason}, payload.governance_proposal_id)
+        event = _emit_nexus_event(
+            db,
+            domain='skills',
+            entity_type='skill',
+            entity_id=skill_id,
+            event_type='SKILL_RETIRED',
+            payload={'actor': payload.actor, 'reason': payload.reason, 'governance_proposal_id': payload.governance_proposal_id},
+            evidence=[{'source': 'skills.retire'}],
+        )
         db.commit()
+        _publish_nexus_event_if_possible(event)
         updated = row_dict(db.execute('SELECT * FROM skills WHERE skill_id = ?', (skill_id,)).fetchone()) or {}
         return decode_json_fields(updated, 'metadata', 'lineage', 'provenance', 'evidence')
 
@@ -1038,6 +1454,416 @@ def console_observability() -> dict[str, Any]:
         }
 
 
+@app.get('/nexus/domain-contract')
+def nexus_domain_contract() -> dict[str, Any]:
+    contract = NexusDomainContract(
+        mission={'id': 'mission_id', 'wallet_id': 'wallet_id', 'status': 'planned|completed|failed', 'max_cost': 'decimal'},
+        decision={'id': 'decision_id', 'mission_id': 'mission_id', 'status': 'APPROVED|HOLD', 'selected_model': 'model_id|null'},
+        reservation={'id': 'reservation_id', 'mission_id': 'mission_id', 'status': 'reserved|settled', 'amount': 'decimal'},
+        execution={'id': 'execution_id', 'mission_id': 'mission_id', 'usage': 'measured_resource_usage', 'outcome': 'verified_success|failed'},
+        settlement={'id': 'settlement_id', 'execution_id': 'execution_id', 'amount': 'decimal', 'event_hash': 'sha256'},
+        skill_lifecycle={'id': 'skill_id', 'status': 'discovered|candidate|qualified|admitted|retired', 'evidence': 'append_only'},
+        governance_action={'id': 'action_id', 'status': 'PENDING_APPROVAL|APPROVED|REJECTED|EXECUTED', 'lease_nonce': 'unique_nonce'},
+        evidence_record={'source': 'string', 'checksum': 'optional_hash', 'attributes': 'dict'},
+    )
+    return contract.model_dump()
+
+
+@app.post('/nexus/events', status_code=201)
+def append_nexus_event(payload: NexusEventCreate) -> dict[str, Any]:
+    with closing(connect()) as db:
+        event = _append_nexus_event(db, payload)
+        db.commit()
+    _publish_nexus_event_if_possible(event)
+    return event
+
+
+@app.get('/nexus/events')
+def list_nexus_events(
+    domain: str | None = None,
+    entity_id: str | None = None,
+    entity_type: str | None = None,
+    since_height: int | None = None,
+    until_height: int | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    limit = max(1, min(limit, 500))
+    clauses: list[str] = []
+    params: list[Any] = []
+    if domain:
+        clauses.append('domain = ?')
+        params.append(domain)
+    if entity_id:
+        clauses.append('entity_id = ?')
+        params.append(entity_id)
+    if entity_type:
+        clauses.append('entity_type = ?')
+        params.append(entity_type)
+    if since_height:
+        clauses.append('block_height >= ?')
+        params.append(since_height)
+    if until_height:
+        clauses.append('block_height <= ?')
+        params.append(until_height)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ''
+    with closing(connect()) as db:
+        rows = db.execute(f'SELECT * FROM nexus_events {where} ORDER BY block_height ASC LIMIT ?', (*params, limit)).fetchall()
+        return [decode_json_fields(row_dict(row) or {}, 'payload', 'evidence') for row in rows]
+
+
+@app.websocket('/nexus/stream')
+async def nexus_stream(websocket: WebSocket) -> None:
+    filters = {
+        'domain': websocket.query_params.get('domain', ''),
+        'entity_id': websocket.query_params.get('entity_id', ''),
+    }
+    await NEXUS_STREAM.connect(websocket, filters)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        NEXUS_STREAM.disconnect(websocket)
+
+
+@app.post('/nexus/gavel/actions', status_code=201)
+def create_gavel_action(payload: GavelActionCreate) -> dict[str, Any]:
+    try:
+        estimated_cost = money(payload.estimated_cost)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    action_id = f'action_{uuid.uuid4().hex[:12]}'
+    needs_human = payload.requires_human or payload.confidence <= 0.95 or estimated_cost > Decimal('100.000000') or payload.risk_level in {'HIGH', 'CRITICAL'}
+    with closing(connect()) as db:
+        db.execute(
+            'INSERT INTO nexus_gavel_actions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            (
+                action_id,
+                payload.action_type,
+                payload.entity_ref,
+                payload.confidence,
+                money_str(estimated_cost),
+                payload.risk_level,
+                _canonical_json(payload.payload),
+                int(needs_human),
+                'PENDING_APPROVAL' if needs_human else 'APPROVED',
+                None,
+                None,
+                None,
+                None,
+                None,
+                now(),
+                None,
+                None,
+            ),
+        )
+        event = _emit_nexus_event(
+            db,
+            domain='governance',
+            entity_type='gavel_action',
+            entity_id=action_id,
+            event_type='GAVEL_ACTION_CREATED',
+            payload={'action_type': payload.action_type, 'entity_ref': payload.entity_ref, 'requires_human': needs_human, 'risk_level': payload.risk_level},
+            evidence=[{'source': 'nexus.gavel.create'}],
+        )
+        db.commit()
+    _publish_nexus_event_if_possible(event)
+    with closing(connect()) as db:
+        row = row_dict(db.execute('SELECT * FROM nexus_gavel_actions WHERE action_id = ?', (action_id,)).fetchone()) or {}
+    return decode_json_fields(row, 'payload', 'signed_lease')
+
+
+@app.get('/nexus/gavel/actions')
+def list_gavel_actions(status: str | None = None) -> list[dict[str, Any]]:
+    with closing(connect()) as db:
+        if status:
+            rows = db.execute('SELECT * FROM nexus_gavel_actions WHERE status = ? ORDER BY created_at DESC', (status,)).fetchall()
+        else:
+            rows = db.execute('SELECT * FROM nexus_gavel_actions ORDER BY created_at DESC').fetchall()
+        return [decode_json_fields(row_dict(row) or {}, 'payload', 'signed_lease') for row in rows]
+
+
+@app.post('/nexus/gavel/actions/{action_id}/decision')
+def decide_gavel_action(action_id: str, payload: GavelActionDecision) -> dict[str, Any]:
+    with closing(connect()) as db:
+        action = db.execute('SELECT * FROM nexus_gavel_actions WHERE action_id = ?', (action_id,)).fetchone()
+        if not action:
+            raise HTTPException(404, 'gavel action not found')
+        if action['status'] not in {'PENDING_APPROVAL', 'APPROVED'}:
+            raise HTTPException(409, f'action is not decidable from status {action["status"]}')
+        if payload.decision == 'approve':
+            if action['requires_human']:
+                if not all([payload.signer_key_id, payload.signature, payload.nonce, payload.lease_expires_at]):
+                    raise HTTPException(422, 'signed lease fields are required for human approval')
+                if not _iso_is_future(payload.lease_expires_at):
+                    raise HTTPException(422, 'lease_expires_at must be a future timestamp')
+                existing_nonce = db.execute('SELECT nonce FROM nexus_lease_nonces WHERE nonce = ?', (payload.nonce,)).fetchone()
+                if existing_nonce:
+                    raise HTTPException(409, 'nonce already used')
+                db.execute('INSERT INTO nexus_lease_nonces VALUES (?, ?, ?)', (payload.nonce, action_id, now()))
+                signed_lease = {
+                    'signer_key_id': payload.signer_key_id,
+                    'signature': payload.signature,
+                    'nonce': payload.nonce,
+                    'lease_expires_at': payload.lease_expires_at,
+                }
+                status = 'APPROVED'
+                db.execute('UPDATE nexus_gavel_actions SET status = ?, signed_lease = ?, lease_nonce = ?, lease_expires_at = ?, decision_actor = ?, decision_note = ?, decided_at = ? WHERE action_id = ?', (status, _canonical_json(signed_lease), payload.nonce, payload.lease_expires_at, payload.actor, payload.note, now(), action_id))
+            else:
+                status = 'APPROVED'
+                db.execute('UPDATE nexus_gavel_actions SET status = ?, decision_actor = ?, decision_note = ?, decided_at = ? WHERE action_id = ?', (status, payload.actor, payload.note, now(), action_id))
+        else:
+            status = 'REJECTED'
+            db.execute('UPDATE nexus_gavel_actions SET status = ?, decision_actor = ?, decision_note = ?, decided_at = ? WHERE action_id = ?', (status, payload.actor, payload.note, now(), action_id))
+        event = _emit_nexus_event(
+            db,
+            domain='governance',
+            entity_type='gavel_action',
+            entity_id=action_id,
+            event_type='GAVEL_ACTION_DECIDED',
+            payload={'decision': payload.decision, 'actor': payload.actor, 'status': status},
+            evidence=[{'source': 'nexus.gavel.decision'}],
+        )
+        db.commit()
+    _publish_nexus_event_if_possible(event)
+    with closing(connect()) as db:
+        row = row_dict(db.execute('SELECT * FROM nexus_gavel_actions WHERE action_id = ?', (action_id,)).fetchone()) or {}
+    return decode_json_fields(row, 'payload', 'signed_lease')
+
+
+@app.post('/nexus/gavel/actions/{action_id}/execute', status_code=201)
+def execute_gavel_action(action_id: str, payload: GavelActionExecute) -> dict[str, Any]:
+    with closing(connect()) as db:
+        action = db.execute('SELECT * FROM nexus_gavel_actions WHERE action_id = ?', (action_id,)).fetchone()
+        if not action:
+            raise HTTPException(404, 'gavel action not found')
+        if action['status'] != 'APPROVED':
+            raise HTTPException(409, 'action is not approved')
+        if action['requires_human'] and (not action['lease_nonce'] or not action['lease_expires_at'] or not _iso_is_future(action['lease_expires_at'])):
+            raise HTTPException(403, 'approved signed lease is missing or expired')
+        action_payload = json.loads(action['payload'])
+        if action['action_type'] == 'EXECUTE_MISSION':
+            run = create_and_execute_mission(EconomicMissionRequest(**action_payload))
+            execution_result = {'result': run}
+        else:
+            execution_result = {'result': {'status': 'NOOP', 'message': 'No actuator mapped for action type'}}
+        db.execute('UPDATE nexus_gavel_actions SET status = ?, executed_at = ?, decision_actor = ? WHERE action_id = ?', ('EXECUTED', now(), payload.actor, action_id))
+        event = _emit_nexus_event(
+            db,
+            domain='governance',
+            entity_type='gavel_action',
+            entity_id=action_id,
+            event_type='GAVEL_ACTION_EXECUTED',
+            payload={'actor': payload.actor, 'action_type': action['action_type'], **execution_result},
+            evidence=[{'source': 'nexus.gavel.execute'}],
+        )
+        db.commit()
+    _publish_nexus_event_if_possible(event)
+    with closing(connect()) as db:
+        row = row_dict(db.execute('SELECT * FROM nexus_gavel_actions WHERE action_id = ?', (action_id,)).fetchone()) or {}
+    return {'action': decode_json_fields(row, 'payload', 'signed_lease'), 'execution': execution_result}
+
+
+@app.get('/nexus/replay/timeline')
+def replay_timeline(limit: int = 200) -> list[dict[str, Any]]:
+    return list_nexus_events(limit=max(1, min(limit, 1000)))
+
+
+@app.post('/nexus/replay/projection')
+def replay_projection(payload: ReplayProjectionRequest) -> dict[str, Any]:
+    with closing(connect()) as db:
+        rows = db.execute('SELECT * FROM nexus_events WHERE block_height <= ? ORDER BY block_height ASC', (payload.block_height,)).fetchall()
+    wallets: dict[str, dict[str, Any]] = {}
+    missions: dict[str, dict[str, Any]] = {}
+    skills: dict[str, dict[str, Any]] = {}
+    governance: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        event = decode_json_fields(row_dict(row) or {}, 'payload', 'evidence')
+        if event['entity_type'] == 'wallet':
+            wallets[event['entity_id']] = event['payload']
+        elif event['entity_type'] == 'mission':
+            missions[event['entity_id']] = event['payload']
+        elif event['entity_type'] == 'skill':
+            skills[event['entity_id']] = {'event_type': event['event_type'], **event['payload']}
+        elif event['entity_type'] in {'proposal', 'gavel_action'}:
+            governance[event['entity_id']] = {'event_type': event['event_type'], **event['payload']}
+    return {'block_height': payload.block_height, 'wallets': wallets, 'missions': missions, 'skills': skills, 'governance': governance}
+
+
+@app.post('/nexus/replay/rollback-commands', status_code=201)
+def create_rollback_command(payload: RollbackCommandRequest) -> dict[str, Any]:
+    rollback_id = f'rollback_{uuid.uuid4().hex[:12]}'
+    with closing(connect()) as db:
+        require_human_governance_proof(db, payload.governance_proposal_id)
+        highest = db.execute('SELECT COALESCE(MAX(block_height), 0) AS max_height FROM nexus_events').fetchone()
+        if payload.target_block_height > highest['max_height']:
+            raise HTTPException(422, 'target block height exceeds current event spine')
+        db.execute('INSERT INTO nexus_rollback_commands VALUES (?, ?, ?, ?, ?, ?, ?)', (rollback_id, payload.target_block_height, payload.governance_proposal_id, payload.actor, payload.reason, 'QUEUED_GOVERNED_COMMAND', now()))
+        event = _emit_nexus_event(
+            db,
+            domain='governance',
+            entity_type='rollback_command',
+            entity_id=rollback_id,
+            event_type='ROLLBACK_COMMAND_QUEUED',
+            payload=payload.model_dump(),
+            evidence=[{'source': 'nexus.replay.rollback'}],
+        )
+        db.commit()
+    _publish_nexus_event_if_possible(event)
+    with closing(connect()) as db:
+        row = row_dict(db.execute('SELECT * FROM nexus_rollback_commands WHERE rollback_id = ?', (rollback_id,)).fetchone()) or {}
+    return row
+
+
+@app.get('/nexus/graph')
+def nexus_graph() -> dict[str, Any]:
+    with closing(connect()) as db:
+        wallets = [row_dict(row) or {} for row in db.execute('SELECT * FROM wallets').fetchall()]
+        missions = [row_dict(row) or {} for row in db.execute('SELECT * FROM missions').fetchall()]
+        skills = [row_dict(row) or {} for row in db.execute('SELECT * FROM skills').fetchall()]
+        proposals = [row_dict(row) or {} for row in db.execute('SELECT * FROM pocket_proposals').fetchall()]
+    nodes: list[dict[str, Any]] = []
+    edges: list[dict[str, Any]] = []
+    for wallet in wallets:
+        nodes.append({'id': wallet['id'], 'type': 'wallet', 'label': wallet['id'], 'state': 'green'})
+    for mission in missions:
+        nodes.append({'id': mission['id'], 'type': 'mission', 'label': mission['description'], 'state': 'green' if mission['status'] == 'completed' else ('amber' if mission['status'] == 'planned' else 'crimson')})
+        edges.append({'source': mission['wallet_id'], 'target': mission['id'], 'type': 'funds'})
+    for skill in skills:
+        nodes.append({'id': skill['skill_id'], 'type': 'skill', 'label': skill['name'], 'state': 'green' if skill['status'] == 'admitted' else ('amber' if skill['status'] in {'candidate', 'qualified'} else 'crimson')})
+    for proposal in proposals:
+        nodes.append({'id': proposal['proposal_id'], 'type': 'governance', 'label': proposal['title'], 'state': 'green' if proposal['status'].startswith('USER_APPROVED') else 'amber'})
+        edges.append({'source': proposal['project_id'], 'target': proposal['proposal_id'], 'type': 'governance'})
+    return {'nodes': nodes, 'edges': edges}
+
+
+@app.get('/nexus/shadow/market')
+def shadow_market() -> dict[str, Any]:
+    with closing(connect()) as db:
+        execution_rows = [decode_json_fields(row_dict(row) or {}, 'usage') for row in db.execute('SELECT * FROM executions').fetchall()]
+        settlement_rows = [row_dict(row) or {} for row in db.execute('SELECT * FROM settlements').fetchall()]
+        mission_rows = [row_dict(row) or {} for row in db.execute('SELECT * FROM missions').fetchall()]
+        opportunities = [decode_json_fields(row_dict(row) or {}, 'evidence') for row in db.execute('SELECT * FROM nexus_shadow_opportunities ORDER BY created_at DESC').fetchall()]
+    total_spend = sum(float(row['amount']) for row in settlement_rows)
+    total_tokens = sum(int(row['usage'].get('token_count', 0)) for row in execution_rows)
+    successful = len([row for row in execution_rows if row['outcome'] == 'verified_success'])
+    success_rate = successful / len(execution_rows) if execution_rows else 0.0
+    quality_holds = len([row for row in mission_rows if row['status'] == 'planned'])
+    efficiency = (total_tokens / total_spend) if total_spend else 0.0
+    return {
+        'token_burn': total_tokens,
+        'total_spend': round(total_spend, 6),
+        'success_rate': round(success_rate, 4),
+        'efficiency_tokens_per_usd': round(efficiency, 4),
+        'quality_holds': quality_holds,
+        'opportunities': opportunities,
+    }
+
+
+@app.post('/nexus/shadow/opportunities', status_code=201)
+def create_shadow_opportunity(payload: ShadowOpportunityCreate) -> dict[str, Any]:
+    opportunity_id = f'opportunity_{uuid.uuid4().hex[:12]}'
+    with closing(connect()) as db:
+        db.execute('INSERT INTO nexus_shadow_opportunities VALUES (?, ?, ?, ?, ?, ?, ?, ?)', (opportunity_id, payload.title, payload.summary, payload.domain, payload.expected_roi, _canonical_json({'items': payload.evidence}), 'ADVISORY_ONLY', now()))
+        event = _emit_nexus_event(
+            db,
+            domain='shadow_market',
+            entity_type='opportunity',
+            entity_id=opportunity_id,
+            event_type='OPPORTUNITY_DISCOVERED',
+            payload=payload.model_dump(),
+            evidence=[{'source': 'nexus.shadow.opportunity'}],
+        )
+        db.commit()
+    _publish_nexus_event_if_possible(event)
+    with closing(connect()) as db:
+        row = row_dict(db.execute('SELECT * FROM nexus_shadow_opportunities WHERE opportunity_id = ?', (opportunity_id,)).fetchone()) or {}
+    return decode_json_fields(row, 'evidence')
+
+
+@app.post('/nexus/shadow/swarm-requests', status_code=201)
+def create_swarm_request(payload: SwarmRequestCreate) -> dict[str, Any]:
+    try:
+        budget = money(payload.budget)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    request_id = f'swarm_{uuid.uuid4().hex[:12]}'
+    with closing(connect()) as db:
+        opportunity = db.execute('SELECT * FROM nexus_shadow_opportunities WHERE opportunity_id = ?', (payload.opportunity_id,)).fetchone()
+        if not opportunity:
+            raise HTTPException(404, 'opportunity not found')
+        require_wallet(db, payload.wallet_id)
+        require_human_governance_proof(db, payload.governance_proposal_id)
+        db.execute('INSERT INTO nexus_swarm_requests VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', (request_id, payload.opportunity_id, payload.wallet_id, money_str(budget), payload.target_roi, payload.governance_proposal_id, payload.actor, 'APPROVED_FOR_COORDINATION', now()))
+        event = _emit_nexus_event(
+            db,
+            domain='shadow_market',
+            entity_type='swarm_request',
+            entity_id=request_id,
+            event_type='SWARM_REQUEST_APPROVED',
+            payload=payload.model_dump(),
+            evidence=[{'source': 'nexus.shadow.swarm'}],
+        )
+        db.commit()
+    _publish_nexus_event_if_possible(event)
+    with closing(connect()) as db:
+        row = row_dict(db.execute('SELECT * FROM nexus_swarm_requests WHERE request_id = ?', (request_id,)).fetchone()) or {}
+    return row
+
+
+@app.post('/nexus/mesh/outbound', status_code=201)
+def enqueue_mesh_outbound(payload: MeshOutboundEnqueue) -> dict[str, Any]:
+    queue_id = f'meshq_{uuid.uuid4().hex[:12]}'
+    with closing(connect()) as db:
+        db.execute('INSERT INTO nexus_mesh_outbound_queue VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', (queue_id, payload.partition_id, payload.event_type, _canonical_json(payload.payload), payload.local_merkle_root, None, 'PENDING_SYNC', None, now(), None))
+        event = _emit_nexus_event(
+            db,
+            domain='mesh',
+            entity_type='outbound_queue',
+            entity_id=queue_id,
+            event_type='MESH_OUTBOUND_ENQUEUED',
+            payload=payload.model_dump(),
+            evidence=[{'source': 'nexus.mesh.enqueue'}],
+        )
+        db.commit()
+    _publish_nexus_event_if_possible(event)
+    with closing(connect()) as db:
+        row = row_dict(db.execute('SELECT * FROM nexus_mesh_outbound_queue WHERE queue_id = ?', (queue_id,)).fetchone()) or {}
+    return decode_json_fields(row, 'payload')
+
+
+@app.post('/nexus/mesh/outbound/{queue_id}/reconcile')
+def reconcile_mesh_outbound(queue_id: str, payload: MeshReconcileRequest) -> dict[str, Any]:
+    with closing(connect()) as db:
+        row = db.execute('SELECT * FROM nexus_mesh_outbound_queue WHERE queue_id = ?', (queue_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, 'mesh queue item not found')
+        db.execute('UPDATE nexus_mesh_outbound_queue SET remote_merkle_root = ?, status = ?, conflict_note = ?, reconciled_at = ? WHERE queue_id = ?', (payload.remote_merkle_root, payload.status, payload.conflict_note, now(), queue_id))
+        event = _emit_nexus_event(
+            db,
+            domain='mesh',
+            entity_type='outbound_queue',
+            entity_id=queue_id,
+            event_type='MESH_OUTBOUND_RECONCILED',
+            payload=payload.model_dump(),
+            evidence=[{'source': 'nexus.mesh.reconcile'}],
+        )
+        db.commit()
+    _publish_nexus_event_if_possible(event)
+    with closing(connect()) as db:
+        updated = row_dict(db.execute('SELECT * FROM nexus_mesh_outbound_queue WHERE queue_id = ?', (queue_id,)).fetchone()) or {}
+    return decode_json_fields(updated, 'payload')
+
+
+@app.get('/nexus/mesh/outbound')
+def list_mesh_outbound(status: str | None = None) -> list[dict[str, Any]]:
+    with closing(connect()) as db:
+        if status:
+            rows = db.execute('SELECT * FROM nexus_mesh_outbound_queue WHERE status = ? ORDER BY created_at DESC', (status,)).fetchall()
+        else:
+            rows = db.execute('SELECT * FROM nexus_mesh_outbound_queue ORDER BY created_at DESC').fetchall()
+        return [decode_json_fields(row_dict(row) or {}, 'payload') for row in rows]
+
+
 @app.post('/micro/wallets/{agent_id}/fund')
 def micro_fund(agent_id: str, payload: MicroFundRequest) -> dict[str, Any]:
     try:
@@ -1075,6 +1901,18 @@ def micro_record_telemetry(payload: TelemetryRequest) -> dict[str, Any]:
         hold = MICRO_BILLING.record_telemetry(TelemetryEvent(**payload.model_dump()))
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
+    with closing(connect()) as db:
+        event = _emit_nexus_event(
+            db,
+            domain='telemetry',
+            entity_type='micro_escrow',
+            entity_id=payload.task_id,
+            event_type='MICRO_TELEMETRY_RECORDED',
+            payload=payload.model_dump(),
+            evidence=[{'source': 'micro.telemetry', 'attributes': {'consumed_amount_micro_cents': hold.consumed_amount_micro_cents}}],
+        )
+        db.commit()
+    _publish_nexus_event_if_possible(event)
     return {'task_id': hold.task_id, 'consumed_amount_micro_cents': hold.consumed_amount_micro_cents, 'remaining_amount_micro_cents': hold.locked_amount_micro_cents - hold.consumed_amount_micro_cents, 'status': hold.status.value}
 
 

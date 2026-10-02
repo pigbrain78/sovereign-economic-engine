@@ -96,6 +96,36 @@ NO VALID GOVERNANCE PROOF
 → NO EXECUTION AUTHORIZATION
 ```
 
+## Sovereign Nexus Hypervisor APIs (incremental)
+
+Nexus extends the same FastAPI backend as the authoritative control plane:
+
+- Domain contract and event spine:
+  - `GET /nexus/domain-contract`
+  - `POST /nexus/events`
+  - `GET /nexus/events`
+  - `WS /nexus/stream`
+- Governance action queue ("Sovereign Gavel"):
+  - `POST /nexus/gavel/actions`
+  - `GET /nexus/gavel/actions`
+  - `POST /nexus/gavel/actions/{action_id}/decision`
+  - `POST /nexus/gavel/actions/{action_id}/execute`
+- Replay court:
+  - `GET /nexus/replay/timeline`
+  - `POST /nexus/replay/projection`
+  - `POST /nexus/replay/rollback-commands`
+- Graph and market views:
+  - `GET /nexus/graph`
+  - `GET /nexus/shadow/market`
+  - `POST /nexus/shadow/opportunities`
+  - `POST /nexus/shadow/swarm-requests`
+- Mesh survivability queue:
+  - `POST /nexus/mesh/outbound`
+  - `POST /nexus/mesh/outbound/{queue_id}/reconcile`
+  - `GET /nexus/mesh/outbound`
+
+Rollback commands are governed audit commands only; they do not mutate historical records directly.
+
 ## Core economic flow
 
 ```text

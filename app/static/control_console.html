@@ -3,56 +3,137 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>AI Economic Control Console</title>
+  <title>Sovereign Nexus Hypervisor</title>
   <style>
-    body { font-family: Arial, sans-serif; margin: 24px; color: #111; }
+    body { font-family: Arial, sans-serif; margin: 24px; color: #111; background: #0f1115; color: #d8e2f0; }
     h1 { margin-bottom: 8px; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
-    .card { border: 1px solid #ddd; border-radius: 8px; padding: 12px; }
+    .grid { display: grid; grid-template-columns: 280px 1fr; gap: 16px; }
+    .subgrid { display: grid; grid-template-columns: repeat(2,minmax(280px,1fr)); gap: 16px; }
+    .card { border: 1px solid #2b3342; border-radius: 8px; padding: 12px; background: #171d27; }
     input, button, textarea { width: 100%; margin-top: 6px; margin-bottom: 8px; padding: 8px; box-sizing: border-box; }
-    button { cursor: pointer; }
-    pre { background: #fafafa; border: 1px solid #eee; border-radius: 8px; padding: 12px; max-height: 460px; overflow: auto; }
+    button { cursor: pointer; background: #1f6feb; color: #fff; border: none; border-radius: 4px; }
+    pre { background: #0d1117; border: 1px solid #2b3342; border-radius: 8px; padding: 12px; max-height: 380px; overflow: auto; }
     .ok { color: #0a7; font-weight: 600; }
     .warn { color: #a50; font-weight: 600; }
+    .modes button { text-align: left; margin-bottom: 4px; background: #1c2330; }
+    .mode-active { background: #1f6feb !important; }
+    .feed { max-height: 200px; overflow: auto; font-size: 12px; border: 1px solid #2b3342; border-radius: 8px; padding: 8px; }
+    .chip { display: inline-block; padding: 2px 8px; border-radius: 999px; border: 1px solid #2b3342; margin-right: 6px; font-size: 12px; }
   </style>
 </head>
 <body>
-  <h1>AI Economic Control Console</h1>
-  <p>Governance-gated skill lifecycle, economic routing, reservation, measured settlement, and append-only evidence.</p>
-
-  <div class="grid">
-    <div class="card">
-      <h3>Demo simulation</h3>
-      <button id="runDemo">Run controlled mission demo</button>
-      <div id="demoStatus"></div>
-    </div>
-    <div class="card">
-      <h3>Create wallet</h3>
-      <input id="capital" value="10.00" />
-      <input id="minimumLiquidity" value="1.00" />
-      <button id="createWallet">Create wallet</button>
-      <div id="walletStatus"></div>
-    </div>
-    <div class="card">
-      <h3>Create skill candidate</h3>
-      <input id="skillName" value="Tax Skill Candidate" />
-      <textarea id="skillDescription">Candidate skill for controlled tax computation.</textarea>
-      <button id="createSkill">Register candidate</button>
-      <div id="skillStatus"></div>
-    </div>
+  <h1>SOVEREIGN NEXUS — Unified Civilization Hypervisor</h1>
+  <p>Authoritative control plane over governance, skills, economy, replay, and mesh survivability.</p>
+  <div>
+    <span class="chip" id="statusBlock">Block: -</span>
+    <span class="chip" id="statusMvs">MVS: n/a</span>
+    <span class="chip" id="statusZtm">ZTM: ENFORCED</span>
   </div>
 
-  <div style="margin-top: 20px;">
-    <button id="refresh">Refresh observability snapshot</button>
+  <div class="grid" style="margin-top: 16px;">
+    <div class="card">
+      <h3>Navigation modes</h3>
+      <div class="modes">
+        <button class="mode-active" data-mode="hud">[1] GODVIEW HUD</button>
+        <button data-mode="foundry">[2] FOUNDRY</button>
+        <button data-mode="court">[3] REPLAY COURT</button>
+        <button data-mode="market">[4] SHADOW MARKET</button>
+      </div>
+      <h4>Live event stream</h4>
+      <div id="streamFeed" class="feed">Connecting...</div>
+    </div>
+
+    <div>
+      <div class="subgrid">
+        <div class="card" id="panel-hud">
+          <h3>Godview HUD</h3>
+          <button id="refreshGraph">Refresh topology graph</button>
+          <pre id="graphSnapshot">Loading graph...</pre>
+        </div>
+        <div class="card" id="panel-foundry">
+          <h3>Foundry</h3>
+          <input id="skillName" value="Tax Skill Candidate" />
+          <textarea id="skillDescription">Candidate skill for controlled tax computation.</textarea>
+          <button id="createSkill">Register candidate</button>
+          <button id="runDemo">Run controlled mission demo</button>
+          <div id="demoStatus"></div>
+          <div id="skillStatus"></div>
+        </div>
+        <div class="card" id="panel-court">
+          <h3>Replay Court</h3>
+          <input id="replayHeight" placeholder="Block height" />
+          <button id="runProjection">Project state at height</button>
+          <pre id="replaySnapshot">Awaiting projection...</pre>
+        </div>
+        <div class="card" id="panel-market">
+          <h3>Shadow Market</h3>
+          <button id="refreshMarket">Refresh market metrics</button>
+          <pre id="marketSnapshot">Loading market...</pre>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:16px;">
+        <h3>Observability snapshot</h3>
+        <button id="refresh">Refresh full snapshot</button>
+        <pre id="snapshot">Loading...</pre>
+      </div>
+    </div>
   </div>
-  <pre id="snapshot">Loading...</pre>
 
   <script>
+    const streamFeed = document.getElementById('streamFeed');
     const out = (id, text, cls = "") => {
       const el = document.getElementById(id);
       el.className = cls;
       el.textContent = text;
     };
+
+    function appendFeed(line) {
+      const ts = new Date().toISOString();
+      streamFeed.textContent = `[${ts}] ${line}\n` + streamFeed.textContent;
+    }
+
+    function connectStream() {
+      const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const ws = new WebSocket(`${protocol}//${location.host}/nexus/stream`);
+      ws.onopen = () => appendFeed('stream connected');
+      ws.onmessage = (ev) => {
+        const event = JSON.parse(ev.data);
+        document.getElementById('statusBlock').textContent = `Block: #${event.block_height}`;
+        appendFeed(`${event.domain}/${event.event_type} [${event.entity_id}]`);
+      };
+      ws.onclose = () => {
+        appendFeed('stream disconnected, retrying...');
+        setTimeout(connectStream, 1200);
+      };
+      setInterval(() => {
+        if (ws.readyState === 1) ws.send('ping');
+      }, 25000);
+    }
+
+    async function refreshGraph() {
+      const res = await fetch('/nexus/graph');
+      const data = await res.json();
+      document.getElementById('graphSnapshot').textContent = JSON.stringify(data, null, 2);
+    }
+
+    async function refreshMarket() {
+      const res = await fetch('/nexus/shadow/market');
+      const data = await res.json();
+      document.getElementById('marketSnapshot').textContent = JSON.stringify(data, null, 2);
+      document.getElementById('statusMvs').textContent = `MVS: ${data.success_rate ?? 'n/a'}`;
+    }
+
+    async function runProjection() {
+      const height = Number(document.getElementById('replayHeight').value || 1);
+      const res = await fetch('/nexus/replay/projection', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ block_height: height })
+      });
+      const data = await res.json();
+      document.getElementById('replaySnapshot').textContent = JSON.stringify(data, null, 2);
+    }
 
     async function refresh() {
       const res = await fetch('/console/observability');
@@ -66,14 +147,6 @@
       const res = await fetch('/console/demo/run', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({}) });
       const data = await res.json();
       out('demoStatus', res.ok ? `Demo run status: ${data.run?.status || 'ok'}` : `Demo failed: ${data.detail || 'unknown'}`, res.ok ? "ok" : "warn");
-      await refresh();
-    };
-
-    document.getElementById('createWallet').onclick = async () => {
-      const payload = { capital: document.getElementById('capital').value, minimum_liquidity: document.getElementById('minimumLiquidity').value };
-      const res = await fetch('/wallets', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
-      const data = await res.json();
-      out('walletStatus', res.ok ? `Wallet created: ${data.id}` : `Wallet failed: ${data.detail || 'unknown'}`, res.ok ? "ok" : "warn");
       await refresh();
     };
 
@@ -93,6 +166,20 @@
       await refresh();
     };
 
+    document.getElementById('refreshGraph').onclick = refreshGraph;
+    document.getElementById('refreshMarket').onclick = refreshMarket;
+    document.getElementById('runProjection').onclick = runProjection;
+
+    document.querySelectorAll('.modes button').forEach(btn => {
+      btn.onclick = () => {
+        document.querySelectorAll('.modes button').forEach(other => other.classList.remove('mode-active'));
+        btn.classList.add('mode-active');
+      };
+    });
+
+    connectStream();
+    refreshGraph();
+    refreshMarket();
     refresh();
   </script>
 </body>
