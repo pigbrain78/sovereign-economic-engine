@@ -9,6 +9,7 @@ A runnable backend for governed, cost-aware AI work. The service combines the ve
 - **Durable memory**: deduplicated memory records with a verifiable SQLite hash-chained provenance ledger.
 - **Pocket OS control plane**: projects, open improvement loops, advisory AI Shadow observations, evidence-backed proposals, human decision records, and a separate hash-chained control-plane event log.
 - **Hugging Face model layer**: interchangeable Inference Provider catalog, `cheapest`/`fastest`/`preferred` routing policies, verified-pricing quotes, and a server-side adapter that fails closed until provider credentials and wallet settlement are configured.
+- **Upgrade treasury**: every deposit can split into operating, development, safety, and owner reserves; RDP fitness and scenario evidence gate upgrades; Ed25519 approval signatures authorize development-reserve holds; verified completion settles and failed completion refunds.
 - **Substrate utilities**: sandbox command construction, checkpoint validation, WAL-tail replay, deterministic canary routing, and latency metrics.
 
 The unverified external SAIL/DRQuinn packages are intentionally not in the execution path.
@@ -208,6 +209,30 @@ sum(payouts) + refund = original escrow
 
 The current micro-billing engine is process-memory state. It is a tested reference layer, not yet a durable multi-process payment ledger.
 
+## Upgrade treasury
+
+Wallet creation defaults to a 10% development reserve, 5% safety reserve, and 5% owner reserve. The remainder is operating capital. Rates are explicit basis-point fields and can be changed only by the wallet owner or a future governed policy—not by an agent.
+
+Upgrade routes:
+
+- `POST /wallets/{wallet_id}/deposit`
+- `POST /upgrades/proposals`
+- `GET /upgrades/proposals`
+- `POST /upgrades/proposals/{proposal_id}/evaluate`
+- `POST /upgrades/proposals/{proposal_id}/approve`
+- `POST /upgrades/proposals/{proposal_id}/complete`
+- `GET /upgrades/events`
+
+The lifecycle is:
+
+```text
+PENDING_EVALUATION → PENDING_HUMAN_GATE → FUNDS_RESERVED → SETTLED
+       │                     │                    │
+       └── EVALUATION_FAILED └── signature gate   └── ROLLED_BACK + refund
+```
+
+`TREASURY_APPROVAL_PUBLIC_KEY_B64` must contain the server-side Ed25519 public key. Approval signatures are verified against a canonical payload containing the proposal, wallet, amount, and actor. The upgrade ledger is independently hash-chained and included in `/health`.
+
 ## Memory API
 
 - `POST /memory/remember`
@@ -249,11 +274,11 @@ python3 -m compileall -q app tests
 pytest -q
 ```
 
-Current verified result: **37 passed**.
+Current verified result: **39 passed**.
 
 ## Production boundary
 
-This is a functioning integrated MVP, not a sealed production platform. Remaining work includes wallet reservation/settlement wiring around the Hugging Face adapter, live provider pricing synchronization, trusted provider execution, direct resource measurement, durable micro-billing persistence, authentication and tenant isolation, Ed25519 capability authorization, strict RFC 8785/JCS integration, crash-safe multi-process settlement, a governed sandbox promotion path for generated code, and a real Pocket OS council/capability backend beyond the current explicit human-decision record.
+This is a functioning integrated MVP, not a sealed production platform. Remaining work includes promotion sandbox integration for candidate code, multi-process locking/fencing for upgrade settlement, live provider pricing synchronization, trusted provider execution, direct resource measurement, durable micro-billing persistence, authentication and tenant isolation, strict RFC 8785/JCS integration, and a real Pocket OS council/capability backend beyond the current explicit human-decision record.
 
 Core rule:
 

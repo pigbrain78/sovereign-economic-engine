@@ -35,7 +35,7 @@ def test_end_to_end_wallet_route_and_settlement():
         'outcome': 'verified_success', 'evidence': {'validator': 'deterministic-demo'},
     })
     assert execution.status_code == 201
-    assert execution.json()['wallet']['available'] == '9.580000'
+    assert execution.json()['wallet']['available'] == '7.580000'
     assert execution.json()['wallet']['spent'] == '0.420000'
 
     replay = client.post('/executions', json={
@@ -48,7 +48,7 @@ def test_end_to_end_wallet_route_and_settlement():
     assert replay.json()['wallet']['spent'] == '0.420000'
 
     ledger = client.get(f"/ledger/{wallet['id']}").json()
-    assert [event['event'] for event in ledger] == ['deposit', 'reserve', 'outcome', 'release']
+    assert [event['event'] for event in ledger] == ['deposit', 'allocate_development', 'allocate_safety', 'allocate_owner', 'reserve', 'outcome', 'release']
 
 
 def test_route_holds_when_no_model_meets_quality_and_cost():

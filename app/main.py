@@ -18,6 +18,7 @@ from app.substrate import PricingPolicy, ResourceUsage
 from app.memory import MemoryAPI
 from app.micro_billing import MetricType, SplitRevenueContract, SplitRule, SynapseMicroBillingEngine, TelemetryEvent
 from app.huggingface_layer import HuggingFaceProviderUnavailable, ModelPolicyViolation, HuggingFaceChatAdapter, catalog as hf_catalog, quote_model as hf_quote_model, select_model as hf_select_model
+from app.upgrade_treasury import RDPFitnessMetric, ReserveRates, ScenarioPath, ScenarioSimulator, UpgradeStatus, canonical_approval_payload, verify_ed25519_signature
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = Path(__import__('os').environ.get('SOVEREIGN_DB', BASE_DIR / 'sovereign.db'))
@@ -69,6 +70,12 @@ def init_db() -> None:
             reserved TEXT NOT NULL,
             spent TEXT NOT NULL,
             minimum_liquidity TEXT NOT NULL,
+            development_reserve TEXT NOT NULL DEFAULT '0.000000',
+            safety_reserve TEXT NOT NULL DEFAULT '0.000000',
+            owner_reserve TEXT NOT NULL DEFAULT '0.000000',
+            development_rate_bps INTEGER NOT NULL DEFAULT 1000,
+            safety_rate_bps INTEGER NOT NULL DEFAULT 500,
+            owner_rate_bps INTEGER NOT NULL DEFAULT 500,
             created_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS models (
@@ -195,10 +202,51 @@ def init_db() -> None:
             event_hash TEXT NOT NULL UNIQUE,
             created_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS upgrade_proposals (
+            proposal_id TEXT PRIMARY KEY,
+            wallet_id TEXT NOT NULL REFERENCES wallets(id),
+            target_module TEXT NOT NULL,
+            estimated_cost TEXT NOT NULL,
+            predicted_monthly_value TEXT NOT NULL,
+            predicted_roi REAL NOT NULL,
+            actual_roi REAL,
+            status TEXT NOT NULL,
+            rdp_metrics TEXT,
+            scenario_paths TEXT NOT NULL,
+            selected_path TEXT,
+            signature_proof TEXT,
+            approval_actor TEXT,
+            reserved_amount TEXT NOT NULL DEFAULT '0.000000',
+            evidence TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS upgrade_events (
+            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id TEXT NOT NULL UNIQUE,
+            proposal_id TEXT NOT NULL REFERENCES upgrade_proposals(proposal_id),
+            event_type TEXT NOT NULL,
+            amount TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            previous_hash TEXT NOT NULL,
+            event_hash TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL
+        );
         ''')
         mission_columns = {row['name'] for row in db.execute('PRAGMA table_info(missions)').fetchall()}
         if 'task_type' not in mission_columns:
             db.execute("ALTER TABLE missions ADD COLUMN task_type TEXT NOT NULL DEFAULT 'general'")
+        wallet_columns = {row['name'] for row in db.execute('PRAGMA table_info(wallets)').fetchall()}
+        for column, definition in {
+            'development_reserve': "TEXT NOT NULL DEFAULT '0.000000'",
+            'safety_reserve': "TEXT NOT NULL DEFAULT '0.000000'",
+            'owner_reserve': "TEXT NOT NULL DEFAULT '0.000000'",
+            'development_rate_bps': 'INTEGER NOT NULL DEFAULT 1000',
+            'safety_rate_bps': 'INTEGER NOT NULL DEFAULT 500',
+            'owner_rate_bps': 'INTEGER NOT NULL DEFAULT 500',
+        }.items():
+            if column not in wallet_columns:
+                db.execute(f'ALTER TABLE wallets ADD COLUMN {column} {definition}')
         db.commit()
 
 
@@ -210,6 +258,41 @@ def startup() -> None:
 class WalletCreate(BaseModel):
     capital: str = Field(pattern=r'^\d+(\.\d{1,6})?$')
     minimum_liquidity: str = Field(default='0.000000', pattern=r'^\d+(\.\d{1,6})?$')
+    development_rate_bps: int = Field(default=1000, ge=0, le=10000)
+    safety_rate_bps: int = Field(default=500, ge=0, le=10000)
+    owner_rate_bps: int = Field(default=500, ge=0, le=10000)
+
+
+class WalletDeposit(BaseModel):
+    amount: str = Field(pattern=r'^\d+(\.\d{1,6})?$')
+
+
+class UpgradeProposalCreate(BaseModel):
+    wallet_id: str
+    target_module: str = Field(min_length=1)
+    estimated_cost: str = Field(pattern=r'^\d+(\.\d{1,6})?$')
+    predicted_monthly_value: str = Field(default='0.000000', pattern=r'^\d+(\.\d{1,6})?$')
+    scenario_paths: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class UpgradeEvaluation(BaseModel):
+    mutation_id: str = Field(min_length=1)
+    ast_node_coverage: float = Field(ge=0, le=1)
+    failure_reduction_rate: float = Field(ge=0, le=1)
+    fitness_score: float = Field(ge=0, le=1)
+    verifier_passed: bool
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+
+class UpgradeApproval(BaseModel):
+    actor: str = Field(min_length=1)
+    signature_b64: str = Field(min_length=1)
+
+
+class UpgradeCompletion(BaseModel):
+    verified: bool
+    actual_monthly_value: str = Field(default='0.000000', pattern=r'^\d+(\.\d{1,6})?$')
+    evidence: dict[str, Any] = Field(default_factory=dict)
 
 
 class ModelCreate(BaseModel):
@@ -382,6 +465,32 @@ def verify_pocket_events(db: sqlite3.Connection) -> bool:
     return True
 
 
+def upgrade_event(db: sqlite3.Connection, proposal_id: str, event_type: str, amount: Decimal, payload: dict[str, Any]) -> None:
+    previous = db.execute('SELECT event_hash FROM upgrade_events ORDER BY sequence DESC LIMIT 1').fetchone()
+    previous_hash = previous['event_hash'] if previous else '0' * 64
+    created_at = now()
+    body = {'proposal_id': proposal_id, 'event_type': event_type, 'amount': money_str(amount), 'payload': payload, 'previous_hash': previous_hash, 'created_at': created_at}
+    event_hash = hashlib.sha256(json.dumps(body, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
+    db.execute('INSERT INTO upgrade_events(event_id,proposal_id,event_type,amount,payload,previous_hash,event_hash,created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', (hashlib.sha256(event_hash.encode()).hexdigest()[:32], proposal_id, event_type, money_str(amount), json.dumps(payload, sort_keys=True), previous_hash, event_hash, created_at))
+
+
+def verify_upgrade_events(db: sqlite3.Connection) -> bool:
+    previous_hash = '0' * 64
+    for row in db.execute('SELECT * FROM upgrade_events ORDER BY sequence').fetchall():
+        if row['previous_hash'] != previous_hash:
+            return False
+        body = {'proposal_id': row['proposal_id'], 'event_type': row['event_type'], 'amount': row['amount'], 'payload': json.loads(row['payload']), 'previous_hash': row['previous_hash'], 'created_at': row['created_at']}
+        expected = hashlib.sha256(json.dumps(body, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
+        if expected != row['event_hash']:
+            return False
+        previous_hash = row['event_hash']
+    return True
+
+
+def reserve_totals(wallet: sqlite3.Row) -> Decimal:
+    return money(wallet['available']) + money(wallet['reserved']) + money(wallet['spent']) + money(wallet['development_reserve']) + money(wallet['safety_reserve']) + money(wallet['owner_reserve'])
+
+
 def require_project(db: sqlite3.Connection, project_id: str) -> sqlite3.Row:
     project = db.execute('SELECT * FROM pocket_projects WHERE project_id = ?', (project_id,)).fetchone()
     if not project:
@@ -403,21 +512,30 @@ def require_wallet(db: sqlite3.Connection, wallet_id: str) -> sqlite3.Row:
     return wallet
 
 
+def require_upgrade(db: sqlite3.Connection, proposal_id: str) -> sqlite3.Row:
+    proposal = db.execute('SELECT * FROM upgrade_proposals WHERE proposal_id = ?', (proposal_id,)).fetchone()
+    if not proposal:
+        raise HTTPException(404, 'upgrade proposal not found')
+    return proposal
+
+
 @app.get('/health')
 def health() -> dict[str, Any]:
     memory_health = MEMORY.health()
     with closing(connect()) as db:
         pocket_ledger_verified = verify_pocket_events(db)
+        upgrade_ledger_verified = verify_upgrade_events(db)
     hf_models = hf_catalog()
     hf_ready = bool(os.environ.get('HF_TOKEN')) and any(model.pricing_verified for model in hf_models)
     return {
-        'status': 'ok' if memory_health['ledger_verified'] and pocket_ledger_verified else 'degraded',
+        'status': 'ok' if memory_health['ledger_verified'] and pocket_ledger_verified and upgrade_ledger_verified else 'degraded',
         'service': 'sovereign-economic-engine',
         'components': {
             'economic_wallet': 'ready',
             'micro_billing': 'ready_in_process_memory',
             'memory': memory_health,
             'pocket_os': {'status': 'ok', 'event_ledger_verified': pocket_ledger_verified},
+            'upgrade_treasury': {'status': 'ok', 'event_ledger_verified': upgrade_ledger_verified},
             'external_model_executor': 'huggingface_ready' if hf_ready else 'huggingface_config_required',
         },
     }
@@ -548,10 +666,18 @@ def create_wallet(payload: WalletCreate) -> dict[str, Any]:
         raise HTTPException(422, str(exc)) from exc
     if minimum > capital:
         raise HTTPException(422, 'minimum_liquidity cannot exceed capital')
+    try:
+        rates = ReserveRates(payload.development_rate_bps, payload.safety_rate_bps, payload.owner_rate_bps)
+        allocation = rates.allocate(capital)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
     wallet_id = f'wallet_{uuid.uuid4().hex[:12]}'
     with closing(connect()) as db:
-        db.execute('INSERT INTO wallets VALUES (?, ?, ?, ?, ?, ?, ?)', (wallet_id, money_str(capital), money_str(capital), '0.000000', '0.000000', money_str(minimum), now()))
+        db.execute('INSERT INTO wallets (id,total,available,reserved,spent,minimum_liquidity,development_reserve,safety_reserve,owner_reserve,development_rate_bps,safety_rate_bps,owner_rate_bps,created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', (wallet_id, money_str(capital), money_str(allocation['operating']), '0.000000', '0.000000', money_str(minimum), money_str(allocation['development']), money_str(allocation['safety']), money_str(allocation['owner']), payload.development_rate_bps, payload.safety_rate_bps, payload.owner_rate_bps, now()))
         ledger(db, wallet_id, 'deposit', capital, metadata={'source': 'initial_capital'})
+        for bucket in ('development', 'safety', 'owner'):
+            if allocation[bucket]:
+                ledger(db, wallet_id, f'allocate_{bucket}', allocation[bucket], metadata={'source': 'deposit_split', 'rate_bps': getattr(payload, f'{bucket}_rate_bps')})
         db.commit()
         return row_dict(db.execute('SELECT * FROM wallets WHERE id = ?', (wallet_id,)).fetchone()) or {}
 
@@ -560,6 +686,134 @@ def create_wallet(payload: WalletCreate) -> dict[str, Any]:
 def get_wallet(wallet_id: str) -> dict[str, Any]:
     with closing(connect()) as db:
         return row_dict(require_wallet(db, wallet_id)) or {}
+
+
+@app.post('/wallets/{wallet_id}/deposit', status_code=201)
+def deposit_wallet(wallet_id: str, payload: WalletDeposit) -> dict[str, Any]:
+    try:
+        amount = money(payload.amount)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    if amount <= 0:
+        raise HTTPException(422, 'deposit amount must be greater than zero')
+    with closing(connect()) as db:
+        wallet = require_wallet(db, wallet_id)
+        rates = ReserveRates(wallet['development_rate_bps'], wallet['safety_rate_bps'], wallet['owner_rate_bps'])
+        allocation = rates.allocate(amount)
+        db.execute('UPDATE wallets SET total = ?, available = ?, development_reserve = ?, safety_reserve = ?, owner_reserve = ? WHERE id = ?', (money_str(money(wallet['total']) + amount), money_str(money(wallet['available']) + allocation['operating']), money_str(money(wallet['development_reserve']) + allocation['development']), money_str(money(wallet['safety_reserve']) + allocation['safety']), money_str(money(wallet['owner_reserve']) + allocation['owner']), wallet_id))
+        ledger(db, wallet_id, 'deposit', amount, metadata={'source': 'deposit'})
+        for bucket in ('development', 'safety', 'owner'):
+            if allocation[bucket]:
+                ledger(db, wallet_id, f'allocate_{bucket}', allocation[bucket], metadata={'source': 'deposit_split', 'rate_bps': wallet[f'{bucket}_rate_bps']})
+        db.commit()
+        return row_dict(db.execute('SELECT * FROM wallets WHERE id = ?', (wallet_id,)).fetchone()) or {}
+
+
+@app.post('/upgrades/proposals', status_code=201)
+def create_upgrade_proposal(payload: UpgradeProposalCreate) -> dict[str, Any]:
+    try:
+        cost = money(payload.estimated_cost)
+        predicted_value = money(payload.predicted_monthly_value)
+        parsed_paths: list[dict[str, Any]] = []
+        for raw_path in payload.scenario_paths:
+            path = ScenarioSimulator.make_path(str(raw_path['path_id']), str(raw_path['decision_node']), float(raw_path['confidence']), money(raw_path['monetary_exposure']), money(raw_path.get('expected_benefit', '0')))
+            parsed_paths.append(path.as_dict())
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(422, f'invalid upgrade proposal: {exc}') from exc
+    proposal_id = f'upgrade_{uuid.uuid4().hex[:12]}'
+    predicted_roi = float(((predicted_value - cost) / cost).quantize(Decimal('0.0001'))) if cost else 0.0
+    with closing(connect()) as db:
+        require_wallet(db, payload.wallet_id)
+        timestamp = now()
+        db.execute('INSERT INTO upgrade_proposals (proposal_id,wallet_id,target_module,estimated_cost,predicted_monthly_value,predicted_roi,actual_roi,status,rdp_metrics,scenario_paths,selected_path,signature_proof,approval_actor,reserved_amount,evidence,created_at,updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', (proposal_id, payload.wallet_id, payload.target_module, money_str(cost), money_str(predicted_value), predicted_roi, None, UpgradeStatus.PENDING_EVALUATION.value, None, json.dumps(parsed_paths, sort_keys=True), None, None, None, '0.000000', '{}', timestamp, timestamp))
+        upgrade_event(db, proposal_id, 'PROPOSAL_CREATED', Decimal('0'), {'wallet_id': payload.wallet_id, 'target_module': payload.target_module, 'predicted_roi': predicted_roi})
+        db.commit()
+        return row_dict(db.execute('SELECT * FROM upgrade_proposals WHERE proposal_id = ?', (proposal_id,)).fetchone()) or {}
+
+
+@app.get('/upgrades/proposals')
+def list_upgrade_proposals(status: str | None = None, wallet_id: str | None = None) -> list[dict[str, Any]]:
+    with closing(connect()) as db:
+        clauses, params = [], []
+        if status:
+            clauses.append('status = ?'); params.append(status)
+        if wallet_id:
+            clauses.append('wallet_id = ?'); params.append(wallet_id)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ''
+        return [row_dict(row) or {} for row in db.execute(f'SELECT * FROM upgrade_proposals{where} ORDER BY created_at DESC', params).fetchall()]
+
+
+@app.post('/upgrades/proposals/{proposal_id}/evaluate')
+def evaluate_upgrade_proposal(proposal_id: str, payload: UpgradeEvaluation) -> dict[str, Any]:
+    metrics = RDPFitnessMetric(payload.mutation_id, payload.ast_node_coverage, payload.failure_reduction_rate, payload.fitness_score)
+    metrics.validate()
+    with closing(connect()) as db:
+        proposal = require_upgrade(db, proposal_id)
+        if proposal['status'] != UpgradeStatus.PENDING_EVALUATION.value:
+            raise HTTPException(409, f'proposal is not awaiting evaluation: {proposal["status"]}')
+        status = UpgradeStatus.PENDING_HUMAN_GATE if payload.verifier_passed and metrics.fitness_score >= .75 else UpgradeStatus.EVALUATION_FAILED
+        db.execute('UPDATE upgrade_proposals SET status = ?, rdp_metrics = ?, evidence = ?, updated_at = ? WHERE proposal_id = ?', (status.value, json.dumps(metrics.as_dict(), sort_keys=True), json.dumps(payload.evidence, sort_keys=True), now(), proposal_id))
+        upgrade_event(db, proposal_id, 'EVALUATION_COMPLETED', Decimal('0'), {'status': status.value, 'rdp_metrics': metrics.as_dict(), 'verifier_passed': payload.verifier_passed})
+        db.commit()
+        return row_dict(db.execute('SELECT * FROM upgrade_proposals WHERE proposal_id = ?', (proposal_id,)).fetchone()) or {}
+
+
+@app.post('/upgrades/proposals/{proposal_id}/approve')
+def approve_upgrade_proposal(proposal_id: str, payload: UpgradeApproval) -> dict[str, Any]:
+    public_key = os.environ.get('TREASURY_APPROVAL_PUBLIC_KEY_B64')
+    if not public_key:
+        raise HTTPException(503, 'TREASURY_APPROVAL_PUBLIC_KEY_B64 is not configured; approval fails closed')
+    with closing(connect()) as db:
+        proposal = require_upgrade(db, proposal_id)
+        if proposal['status'] != UpgradeStatus.PENDING_HUMAN_GATE.value:
+            raise HTTPException(409, f'proposal is not awaiting human approval: {proposal["status"]}')
+        amount = money(proposal['estimated_cost'])
+        approval_payload = canonical_approval_payload(proposal_id, proposal['wallet_id'], amount, payload.actor)
+        if not verify_ed25519_signature(public_key, payload.signature_b64, approval_payload):
+            raise HTTPException(403, 'invalid Ed25519 approval signature')
+        wallet = require_wallet(db, proposal['wallet_id'])
+        development = money(wallet['development_reserve'])
+        if development < amount:
+            raise HTTPException(403, 'insufficient development reserve')
+        db.execute('UPDATE wallets SET development_reserve = ? WHERE id = ?', (money_str(development - amount), wallet['id']))
+        db.execute('UPDATE upgrade_proposals SET status = ?, signature_proof = ?, approval_actor = ?, reserved_amount = ?, updated_at = ? WHERE proposal_id = ?', (UpgradeStatus.FUNDS_RESERVED.value, payload.signature_b64, payload.actor, money_str(amount), now(), proposal_id))
+        ledger(db, wallet['id'], 'upgrade_reserve', amount, metadata={'proposal_id': proposal_id, 'target_module': proposal['target_module'], 'actor': payload.actor})
+        upgrade_event(db, proposal_id, 'FUNDS_RESERVED', amount, {'actor': payload.actor, 'signature_verified': True})
+        db.commit()
+        result = row_dict(db.execute('SELECT * FROM upgrade_proposals WHERE proposal_id = ?', (proposal_id,)).fetchone()) or {}
+        result['signature_verified'] = True
+        return result
+
+
+@app.post('/upgrades/proposals/{proposal_id}/complete')
+def complete_upgrade_proposal(proposal_id: str, payload: UpgradeCompletion) -> dict[str, Any]:
+    with closing(connect()) as db:
+        proposal = require_upgrade(db, proposal_id)
+        if proposal['status'] != UpgradeStatus.FUNDS_RESERVED.value:
+            raise HTTPException(409, f'proposal is not funded: {proposal["status"]}')
+        actual_value = money(payload.actual_monthly_value)
+        cost = money(proposal['estimated_cost'])
+        actual_roi = float(((actual_value - cost) / cost).quantize(Decimal('0.0001'))) if cost else 0.0
+        wallet = require_wallet(db, proposal['wallet_id'])
+        reserved = money(proposal['reserved_amount'])
+        if payload.verified:
+            status = UpgradeStatus.SETTLED
+            ledger(db, wallet['id'], 'upgrade_settle', reserved, metadata={'proposal_id': proposal_id, 'actual_monthly_value': money_str(actual_value), 'actual_roi': actual_roi, 'evidence': payload.evidence})
+            upgrade_event(db, proposal_id, 'UPGRADE_SETTLED', reserved, {'actual_roi': actual_roi, 'evidence': payload.evidence})
+        else:
+            status = UpgradeStatus.ROLLED_BACK
+            db.execute('UPDATE wallets SET development_reserve = ? WHERE id = ?', (money_str(money(wallet['development_reserve']) + reserved), wallet['id']))
+            ledger(db, wallet['id'], 'upgrade_refund', reserved, metadata={'proposal_id': proposal_id, 'reason': 'verification_failed', 'evidence': payload.evidence})
+            upgrade_event(db, proposal_id, 'UPGRADE_ROLLED_BACK', reserved, {'actual_roi': actual_roi, 'evidence': payload.evidence})
+        db.execute('UPDATE upgrade_proposals SET status = ?, actual_roi = ?, evidence = ?, updated_at = ? WHERE proposal_id = ?', (status.value, actual_roi, json.dumps(payload.evidence, sort_keys=True), now(), proposal_id))
+        db.commit()
+        return row_dict(db.execute('SELECT * FROM upgrade_proposals WHERE proposal_id = ?', (proposal_id,)).fetchone()) or {}
+
+
+@app.get('/upgrades/events')
+def list_upgrade_events() -> dict[str, Any]:
+    with closing(connect()) as db:
+        return {'ledger_verified': verify_upgrade_events(db), 'events': [row_dict(row) or {} for row in db.execute('SELECT * FROM upgrade_events ORDER BY sequence ASC').fetchall()]}
 
 
 @app.post('/models', status_code=201)

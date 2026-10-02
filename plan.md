@@ -27,15 +27,16 @@ Establish the smallest executable system that makes the economic boundary real: 
 - Unified FastAPI surface: dollar wallet/routing/settlement, micro-billing escrow, and durable memory endpoints in one service.
 - Pocket OS control plane: project context, open loops, advisory Shadow observations, evidence-backed improvement proposals, human decision states, and a verified control-plane event chain.
 - Hugging Face model layer: interchangeable candidate catalog, capability/quality/budget selection, provider policy choices, verified-pricing quote contracts, and fail-closed server-side adapter boundary.
+- Upgrade treasury: reserve-bucket allocation on deposits, RDP fitness/scenario evaluation gates, Ed25519 human approval, hash-chained upgrade events, development-reserve settlement, and rollback refunds.
 
 ## Next phases
 
-1. Split `app/main.py` into domain modules with repositories and services, then replace the demo measurement payload with a real Axiom Forge/provider adapter.
+1. Split `app/main.py` into domain modules with repositories and services, then replace the demo measurement payload with real provider and candidate-promotion adapters.
 2. Add reservation idempotency, leases, fencing tokens, and crash recovery before external execution.
 3. Add task profiling and capability matching beyond the current quality/cost filter.
 4. Complete the Hugging Face Inference Providers adapter with wallet reservation, measured usage settlement, receipt persistence, live pricing synchronization, and local sandbox fallback.
 5. Add outcome verification and economic-memory learning from actual cost and quality.
-6. Add governance policies for risk classes, human review, prohibited capabilities, and model lifecycle admission.
+6. Add governance policies for risk classes, human review, prohibited capabilities, model lifecycle admission, and upgrade promotion/canary controls.
 7. Add a thin operator UI after the API contract stabilizes.
 8. Add Pocket OS council evaluation, capability authorization, typed project projections, and live event synchronization; keep Shadow authority at `NONE`.
 
