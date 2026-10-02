@@ -28,6 +28,7 @@ Establish the smallest executable system that makes the economic boundary real: 
 - Pocket OS control plane: project context, open loops, advisory Shadow observations, evidence-backed improvement proposals, human decision states, and a verified control-plane event chain.
 - Hugging Face model layer: interchangeable candidate catalog, capability/quality/budget selection, provider policy choices, verified-pricing quote contracts, and fail-closed server-side adapter boundary.
 - Upgrade treasury: reserve-bucket allocation on deposits, RDP fitness/scenario evaluation gates, Ed25519 human approval, hash-chained upgrade events, development-reserve settlement, and rollback refunds.
+- Sandbox promotion: strict candidate bundle validation, deterministic verification receipts, explicit canary activation, atomic active-pointer replacement, and hash-chained rollback/refund records.
 
 ## Next phases
 
@@ -37,6 +38,7 @@ Establish the smallest executable system that makes the economic boundary real: 
 4. Complete the Hugging Face Inference Providers adapter with wallet reservation, measured usage settlement, receipt persistence, live pricing synchronization, and local sandbox fallback.
 5. Add outcome verification and economic-memory learning from actual cost and quality.
 6. Add governance policies for risk classes, human review, prohibited capabilities, model lifecycle admission, and upgrade promotion/canary controls.
+7. Replace the reference file-bundle promoter with a real OS/container sandbox and signed artifact registry before allowing generated code to run.
 7. Add a thin operator UI after the API contract stabilizes.
 8. Add Pocket OS council evaluation, capability authorization, typed project projections, and live event synchronization; keep Shadow authority at `NONE`.
 

@@ -19,6 +19,7 @@ from app.memory import MemoryAPI
 from app.micro_billing import MetricType, SplitRevenueContract, SplitRule, SynapseMicroBillingEngine, TelemetryEvent
 from app.huggingface_layer import HuggingFaceProviderUnavailable, ModelPolicyViolation, HuggingFaceChatAdapter, catalog as hf_catalog, quote_model as hf_quote_model, select_model as hf_select_model
 from app.upgrade_treasury import RDPFitnessMetric, ReserveRates, ScenarioPath, ScenarioSimulator, UpgradeStatus, canonical_approval_payload, verify_ed25519_signature
+from app.sandbox_promotion import SandboxPromotion, SandboxRejected
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = Path(__import__('os').environ.get('SOVEREIGN_DB', BASE_DIR / 'sovereign.db'))
@@ -33,6 +34,7 @@ app.add_middleware(
 )
 MICRO_BILLING = SynapseMicroBillingEngine()
 MEMORY = MemoryAPI(__import__('os').environ.get('SOVEREIGN_MEMORY_DB', BASE_DIR / 'sovereign-memory.db'))
+SANDBOX = SandboxPromotion(__import__('os').environ.get('SOVEREIGN_SANDBOX_ROOT', BASE_DIR / '.sandbox'))
 
 
 def now() -> str:
@@ -232,6 +234,19 @@ def init_db() -> None:
             event_hash TEXT NOT NULL UNIQUE,
             created_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS promotion_records (
+            promotion_id TEXT PRIMARY KEY,
+            proposal_id TEXT NOT NULL UNIQUE REFERENCES upgrade_proposals(proposal_id),
+            candidate_id TEXT NOT NULL,
+            candidate_hash TEXT NOT NULL,
+            verification_receipt TEXT NOT NULL,
+            canary_percent INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            promotion_receipt TEXT,
+            rollback_receipt TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
         ''')
         mission_columns = {row['name'] for row in db.execute('PRAGMA table_info(missions)').fetchall()}
         if 'task_type' not in mission_columns:
@@ -293,6 +308,21 @@ class UpgradeCompletion(BaseModel):
     verified: bool
     actual_monthly_value: str = Field(default='0.000000', pattern=r'^\d+(\.\d{1,6})?$')
     evidence: dict[str, Any] = Field(default_factory=dict)
+
+
+class PromotionCreate(BaseModel):
+    candidate_id: str = Field(min_length=1, max_length=96)
+    files: dict[str, str] = Field(min_length=1)
+    canary_percent: int = Field(default=10, ge=1, le=100)
+
+
+class CanaryActivation(BaseModel):
+    canary_passed: bool
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+
+class RollbackRequest(BaseModel):
+    reason: str = Field(min_length=1, max_length=500)
 
 
 class ModelCreate(BaseModel):
@@ -743,6 +773,12 @@ def list_upgrade_proposals(status: str | None = None, wallet_id: str | None = No
         return [row_dict(row) or {} for row in db.execute(f'SELECT * FROM upgrade_proposals{where} ORDER BY created_at DESC', params).fetchall()]
 
 
+@app.get('/upgrades/proposals/{proposal_id}')
+def get_upgrade_proposal(proposal_id: str) -> dict[str, Any]:
+    with closing(connect()) as db:
+        return row_dict(require_upgrade(db, proposal_id)) or {}
+
+
 @app.post('/upgrades/proposals/{proposal_id}/evaluate')
 def evaluate_upgrade_proposal(proposal_id: str, payload: UpgradeEvaluation) -> dict[str, Any]:
     metrics = RDPFitnessMetric(payload.mutation_id, payload.ast_node_coverage, payload.failure_reduction_rate, payload.fitness_score)
@@ -756,6 +792,99 @@ def evaluate_upgrade_proposal(proposal_id: str, payload: UpgradeEvaluation) -> d
         upgrade_event(db, proposal_id, 'EVALUATION_COMPLETED', Decimal('0'), {'status': status.value, 'rdp_metrics': metrics.as_dict(), 'verifier_passed': payload.verifier_passed})
         db.commit()
         return row_dict(db.execute('SELECT * FROM upgrade_proposals WHERE proposal_id = ?', (proposal_id,)).fetchone()) or {}
+
+
+@app.post('/upgrades/proposals/{proposal_id}/promote')
+def stage_upgrade_candidate(proposal_id: str, payload: PromotionCreate) -> dict[str, Any]:
+    with closing(connect()) as db:
+        proposal = require_upgrade(db, proposal_id)
+        if proposal['status'] != UpgradeStatus.FUNDS_RESERVED.value:
+            raise HTTPException(409, f'proposal must have reserved funds before staging: {proposal["status"]}')
+        try:
+            destination, receipt = SANDBOX.stage(payload.candidate_id, payload.files)
+        except SandboxRejected as exc:
+            upgrade_event(db, proposal_id, 'CANDIDATE_REJECTED', Decimal('0'), {'reason': str(exc)})
+            db.commit()
+            raise HTTPException(422, str(exc)) from exc
+        if not receipt.passed:
+            upgrade_event(db, proposal_id, 'CANDIDATE_VERIFICATION_FAILED', Decimal('0'), receipt.as_dict())
+            db.commit()
+            raise HTTPException(422, receipt.reason)
+        timestamp = now()
+        promotion_id = f'promotion_{uuid.uuid4().hex[:12]}'
+        db.execute('INSERT INTO promotion_records (promotion_id,proposal_id,candidate_id,candidate_hash,verification_receipt,canary_percent,status,promotion_receipt,rollback_receipt,created_at,updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', (promotion_id, proposal_id, payload.candidate_id, receipt.candidate_hash, json.dumps(receipt.as_dict(), sort_keys=True), payload.canary_percent, 'STAGED', None, None, timestamp, timestamp))
+        db.execute('UPDATE upgrade_proposals SET status = ?, evidence = ?, updated_at = ? WHERE proposal_id = ?', (UpgradeStatus.VERIFICATION_PENDING.value, json.dumps({'candidate_hash': receipt.candidate_hash, 'candidate_path': str(destination), 'verification': receipt.as_dict()}, sort_keys=True), timestamp, proposal_id))
+        upgrade_event(db, proposal_id, 'CANDIDATE_STAGED', Decimal('0'), {'promotion_id': promotion_id, 'candidate_hash': receipt.candidate_hash, 'canary_percent': payload.canary_percent})
+        db.commit()
+        result = row_dict(db.execute('SELECT * FROM promotion_records WHERE promotion_id = ?', (promotion_id,)).fetchone()) or {}
+        result['verification'] = receipt.as_dict()
+        return result
+
+
+@app.post('/upgrades/proposals/{proposal_id}/activate')
+def activate_upgrade_candidate(proposal_id: str, payload: CanaryActivation) -> dict[str, Any]:
+    with closing(connect()) as db:
+        proposal = require_upgrade(db, proposal_id)
+        promotion = db.execute('SELECT * FROM promotion_records WHERE proposal_id = ?', (proposal_id,)).fetchone()
+        if proposal['status'] != UpgradeStatus.VERIFICATION_PENDING.value or not promotion:
+            raise HTTPException(409, 'proposal has no staged candidate awaiting canary activation')
+        if not payload.canary_passed:
+            db.execute('UPDATE promotion_records SET status = ?, updated_at = ? WHERE proposal_id = ?', ('CANARY_FAILED', now(), proposal_id))
+            upgrade_event(db, proposal_id, 'CANARY_FAILED', Decimal('0'), {'evidence': payload.evidence})
+            db.commit()
+            raise HTTPException(422, 'canary verification failed; candidate remains inactive')
+        try:
+            receipt = SANDBOX.promote(promotion['candidate_id'], promotion['candidate_hash'])
+        except SandboxRejected as exc:
+            upgrade_event(db, proposal_id, 'PROMOTION_HELD', Decimal('0'), {'reason': str(exc)})
+            db.commit()
+            raise HTTPException(409, str(exc)) from exc
+        timestamp = now()
+        db.execute('UPDATE promotion_records SET status = ?, promotion_receipt = ?, updated_at = ? WHERE proposal_id = ?', ('PROMOTED', json.dumps(receipt.as_dict(), sort_keys=True), timestamp, proposal_id))
+        db.execute('UPDATE upgrade_proposals SET status = ?, evidence = ?, updated_at = ? WHERE proposal_id = ?', (UpgradeStatus.SETTLED.value, json.dumps({'promotion': receipt.as_dict(), 'canary': payload.evidence}, sort_keys=True), timestamp, proposal_id))
+        upgrade_event(db, proposal_id, 'CANDIDATE_PROMOTED', money(proposal['reserved_amount']), {'promotion': receipt.as_dict(), 'canary': payload.evidence})
+        db.commit()
+        result = row_dict(db.execute('SELECT * FROM promotion_records WHERE proposal_id = ?', (proposal_id,)).fetchone()) or {}
+        result['promotion'] = receipt.as_dict()
+        return result
+
+
+@app.post('/upgrades/proposals/{proposal_id}/rollback')
+def rollback_upgrade_candidate(proposal_id: str, payload: RollbackRequest) -> dict[str, Any]:
+    with closing(connect()) as db:
+        proposal = require_upgrade(db, proposal_id)
+        promotion = db.execute('SELECT * FROM promotion_records WHERE proposal_id = ?', (proposal_id,)).fetchone()
+        if not promotion or proposal['status'] not in {UpgradeStatus.VERIFICATION_PENDING.value, UpgradeStatus.SETTLED.value}:
+            raise HTTPException(409, 'proposal has no active or staged candidate to roll back')
+        try:
+            receipt = SANDBOX.rollback(promotion['candidate_hash'])
+        except SandboxRejected as exc:
+            upgrade_event(db, proposal_id, 'ROLLBACK_HELD', Decimal('0'), {'reason': str(exc), 'requested_reason': payload.reason})
+            db.commit()
+            raise HTTPException(409, str(exc)) from exc
+        reserved = money(proposal['reserved_amount'])
+        wallet = require_wallet(db, proposal['wallet_id'])
+        db.execute('UPDATE wallets SET development_reserve = ? WHERE id = ?', (money_str(money(wallet['development_reserve']) + reserved), wallet['id']))
+        db.execute('UPDATE promotion_records SET status = ?, rollback_receipt = ?, updated_at = ? WHERE proposal_id = ?', ('ROLLED_BACK', json.dumps(receipt.as_dict(), sort_keys=True), now(), proposal_id))
+        db.execute('UPDATE upgrade_proposals SET status = ?, evidence = ?, updated_at = ? WHERE proposal_id = ?', (UpgradeStatus.ROLLED_BACK.value, json.dumps({'rollback': receipt.as_dict(), 'reason': payload.reason}, sort_keys=True), now(), proposal_id))
+        ledger(db, wallet['id'], 'upgrade_refund', reserved, metadata={'proposal_id': proposal_id, 'reason': payload.reason, 'promotion_rollback': True})
+        upgrade_event(db, proposal_id, 'CANDIDATE_ROLLED_BACK', reserved, {'rollback': receipt.as_dict(), 'reason': payload.reason})
+        db.commit()
+        result = row_dict(db.execute('SELECT * FROM promotion_records WHERE proposal_id = ?', (proposal_id,)).fetchone()) or {}
+        result['rollback'] = receipt.as_dict()
+        return result
+
+
+@app.get('/upgrades/proposals/{proposal_id}/promotion')
+def get_upgrade_promotion(proposal_id: str) -> dict[str, Any]:
+    with closing(connect()) as db:
+        require_upgrade(db, proposal_id)
+        promotion = db.execute('SELECT * FROM promotion_records WHERE proposal_id = ?', (proposal_id,)).fetchone()
+        if not promotion:
+            raise HTTPException(404, 'promotion record not found')
+        result = row_dict(promotion) or {}
+        result['active'] = SANDBOX.active()
+        return result
 
 
 @app.post('/upgrades/proposals/{proposal_id}/approve')

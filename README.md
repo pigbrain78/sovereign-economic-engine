@@ -222,6 +222,10 @@ Upgrade routes:
 - `POST /upgrades/proposals/{proposal_id}/approve`
 - `POST /upgrades/proposals/{proposal_id}/complete`
 - `GET /upgrades/events`
+- `POST /upgrades/proposals/{proposal_id}/promote`
+- `POST /upgrades/proposals/{proposal_id}/activate`
+- `POST /upgrades/proposals/{proposal_id}/rollback`
+- `GET /upgrades/proposals/{proposal_id}/promotion`
 
 The lifecycle is:
 
@@ -232,6 +236,14 @@ PENDING_EVALUATION → PENDING_HUMAN_GATE → FUNDS_RESERVED → SETTLED
 ```
 
 `TREASURY_APPROVAL_PUBLIC_KEY_B64` must contain the server-side Ed25519 public key. Approval signatures are verified against a canonical payload containing the proposal, wallet, amount, and actor. The upgrade ledger is independently hash-chained and included in `/health`.
+
+## Sandbox promotion and rollback
+
+The promotion layer accepts a candidate file bundle only after funds are reserved. It rejects absolute paths, traversal segments, unsupported file types, oversized files, duplicate candidate IDs, invalid Python syntax, and invalid JSON. Accepted candidates are staged below `SOVEREIGN_SANDBOX_ROOT` and receive a deterministic verification receipt containing the candidate hash, file count, byte count, and checks performed.
+
+Activation requires an explicit canary result. A passed canary atomically replaces the active candidate pointer with `os.replace`; a failed canary leaves the candidate inactive. Rollback verifies the active candidate hash, restores the previous pointer when available, and refunds the reserved development amount. Promotion and rollback events are appended to the upgrade hash chain.
+
+This is a safe reference promotion layer, not a container or VM boundary. It does not execute candidate code, install dependencies, or claim process isolation. Production deployment still requires a separate OS/container sandbox, signed artifact registry, crash-safe fencing, and an application-specific health/canary executor.
 
 ## Memory API
 
@@ -274,7 +286,7 @@ python3 -m compileall -q app tests
 pytest -q
 ```
 
-Current verified result: **39 passed**.
+Current verified result: **42 passed**.
 
 ## Production boundary
 
