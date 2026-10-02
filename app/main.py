@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from app.substrate import PricingPolicy, ResourceUsage
 from app.memory import MemoryAPI
@@ -20,6 +21,13 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = Path(__import__('os').environ.get('SOVEREIGN_DB', BASE_DIR / 'sovereign.db'))
 
 app = FastAPI(title='Sovereign Economic Engine', version='0.1.0')
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=['*'],
+    allow_credentials=False,
+    allow_methods=['*'],
+    allow_headers=['*'],
+)
 MICRO_BILLING = SynapseMicroBillingEngine()
 MEMORY = MemoryAPI(__import__('os').environ.get('SOVEREIGN_MEMORY_DB', BASE_DIR / 'sovereign-memory.db'))
 

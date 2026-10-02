@@ -5,6 +5,12 @@ from app.main import app
 client = TestClient(app)
 
 
+def test_cockpit_cors_is_enabled_for_public_preview():
+    response = client.get('/health', headers={'Origin': 'https://8328-preview.example.test'})
+    assert response.status_code == 200
+    assert response.headers['access-control-allow-origin'] == '*'
+
+
 def test_pocket_builder_proposal_requires_evidence_and_human_decision():
     project = client.post('/pocket/projects', json={
         'name': 'Pocket OS Treasury',
