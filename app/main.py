@@ -291,6 +291,55 @@ def init_db() -> None:
             created_at TEXT NOT NULL,
             reconciled_at TEXT
         );
+        CREATE TABLE IF NOT EXISTS sekai_cooperatives (
+            cooperative_id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            treasury_wallet_id TEXT NOT NULL REFERENCES wallets(id),
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS sekai_agents (
+            agent_id TEXT PRIMARY KEY,
+            cooperative_id TEXT NOT NULL REFERENCES sekai_cooperatives(cooperative_id),
+            name TEXT NOT NULL,
+            role TEXT NOT NULL,
+            model_id TEXT REFERENCES models(id),
+            skills TEXT NOT NULL,
+            reputation REAL NOT NULL,
+            wins INTEGER NOT NULL,
+            losses INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS sekai_jobs (
+            job_id TEXT PRIMARY KEY,
+            cooperative_id TEXT NOT NULL REFERENCES sekai_cooperatives(cooperative_id),
+            title TEXT NOT NULL,
+            task_type TEXT NOT NULL,
+            budget TEXT NOT NULL,
+            minimum_quality REAL NOT NULL,
+            status TEXT NOT NULL,
+            selected_agent_id TEXT REFERENCES sekai_agents(agent_id),
+            selected_bid_id TEXT,
+            mission_id TEXT REFERENCES missions(id),
+            execution_id TEXT,
+            created_at TEXT NOT NULL,
+            resolved_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS sekai_bids (
+            bid_id TEXT PRIMARY KEY,
+            job_id TEXT NOT NULL REFERENCES sekai_jobs(job_id),
+            agent_id TEXT NOT NULL REFERENCES sekai_agents(agent_id),
+            model_id TEXT NOT NULL REFERENCES models(id),
+            expected_cost TEXT NOT NULL,
+            expected_quality REAL NOT NULL,
+            confidence REAL NOT NULL,
+            latency_ms INTEGER NOT NULL,
+            score REAL NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
         ''')
         mission_columns = {row['name'] for row in db.execute('PRAGMA table_info(missions)').fetchall()}
         if 'task_type' not in mission_columns:
@@ -582,6 +631,48 @@ class MeshReconcileRequest(BaseModel):
     status: str = Field(pattern=r'^(MERGED|CONFLICT|DROPPED)$')
 
 
+class SekaiCooperativeCreate(BaseModel):
+    name: str = Field(min_length=1)
+    treasury_wallet_id: str
+
+
+class SekaiAgentCreate(BaseModel):
+    name: str = Field(min_length=1)
+    role: str = Field(min_length=1)
+    model_id: str | None = None
+    skills: list[str] = Field(default_factory=list)
+    reputation: float = Field(default=50, ge=0, le=100)
+
+
+class SekaiJobCreate(BaseModel):
+    title: str = Field(min_length=1)
+    task_type: str = Field(min_length=1)
+    budget: str = Field(pattern=r'^\d+(\.\d{1,6})?$')
+    minimum_quality: float = Field(ge=0, le=1)
+
+
+class SekaiBidCreate(BaseModel):
+    agent_id: str
+    model_id: str
+    expected_cost: str = Field(pattern=r'^\d+(\.\d{1,6})?$')
+    expected_quality: float = Field(ge=0, le=1)
+    confidence: float = Field(ge=0, le=1)
+    latency_ms: int = Field(gt=0)
+
+
+class SekaiSettleRequest(BaseModel):
+    actor: str = Field(min_length=1)
+    execution_id: str = Field(min_length=1)
+    cpu_seconds: float = Field(ge=0)
+    peak_memory_bytes: int = Field(ge=0)
+    io_read_bytes: int = Field(ge=0)
+    io_write_bytes: int = Field(ge=0)
+    token_count: int = Field(default=0, ge=0)
+    wall_seconds: float = Field(default=0, ge=0)
+    outcome: str = Field(pattern=r'^(verified_success|failed)$')
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+
 def row_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
     return dict(row) if row else None
 
@@ -639,6 +730,27 @@ def require_skill(db: sqlite3.Connection, skill_id: str) -> sqlite3.Row:
     if not skill:
         raise HTTPException(404, 'skill not found')
     return skill
+
+
+def require_cooperative(db: sqlite3.Connection, cooperative_id: str) -> sqlite3.Row:
+    cooperative = db.execute('SELECT * FROM sekai_cooperatives WHERE cooperative_id = ?', (cooperative_id,)).fetchone()
+    if not cooperative:
+        raise HTTPException(404, 'sekai cooperative not found')
+    return cooperative
+
+
+def require_agent(db: sqlite3.Connection, agent_id: str) -> sqlite3.Row:
+    agent = db.execute('SELECT * FROM sekai_agents WHERE agent_id = ?', (agent_id,)).fetchone()
+    if not agent:
+        raise HTTPException(404, 'sekai agent not found')
+    return agent
+
+
+def require_job(db: sqlite3.Connection, job_id: str) -> sqlite3.Row:
+    job = db.execute('SELECT * FROM sekai_jobs WHERE job_id = ?', (job_id,)).fetchone()
+    if not job:
+        raise HTTPException(404, 'sekai job not found')
+    return job
 
 
 def decode_json_fields(entry: dict[str, Any], *fields: str) -> dict[str, Any]:
@@ -1862,6 +1974,293 @@ def list_mesh_outbound(status: str | None = None) -> list[dict[str, Any]]:
         else:
             rows = db.execute('SELECT * FROM nexus_mesh_outbound_queue ORDER BY created_at DESC').fetchall()
         return [decode_json_fields(row_dict(row) or {}, 'payload') for row in rows]
+
+
+@app.post('/nexus/sekai/cooperatives', status_code=201)
+def create_sekai_cooperative(payload: SekaiCooperativeCreate) -> dict[str, Any]:
+    cooperative_id = f'coop_{uuid.uuid4().hex[:12]}'
+    with closing(connect()) as db:
+        require_wallet(db, payload.treasury_wallet_id)
+        db.execute('INSERT INTO sekai_cooperatives VALUES (?, ?, ?, ?, ?)', (cooperative_id, payload.name, payload.treasury_wallet_id, 'active', now()))
+        event = _emit_nexus_event(
+            db,
+            domain='sekai',
+            entity_type='cooperative',
+            entity_id=cooperative_id,
+            event_type='SEKAI_COOPERATIVE_CREATED',
+            payload=payload.model_dump(),
+            evidence=[{'source': 'sekai.cooperative.create'}],
+        )
+        db.commit()
+    _publish_nexus_event_if_possible(event)
+    with closing(connect()) as db:
+        row = row_dict(db.execute('SELECT * FROM sekai_cooperatives WHERE cooperative_id = ?', (cooperative_id,)).fetchone()) or {}
+    return row
+
+
+@app.get('/nexus/sekai/cooperatives')
+def list_sekai_cooperatives() -> list[dict[str, Any]]:
+    with closing(connect()) as db:
+        return [row_dict(row) or {} for row in db.execute('SELECT * FROM sekai_cooperatives ORDER BY created_at DESC').fetchall()]
+
+
+@app.post('/nexus/sekai/cooperatives/{cooperative_id}/agents', status_code=201)
+def create_sekai_agent(cooperative_id: str, payload: SekaiAgentCreate) -> dict[str, Any]:
+    agent_id = f'agent_{uuid.uuid4().hex[:12]}'
+    with closing(connect()) as db:
+        require_cooperative(db, cooperative_id)
+        if payload.model_id:
+            model = db.execute('SELECT id FROM models WHERE id = ?', (payload.model_id,)).fetchone()
+            if not model:
+                raise HTTPException(422, 'model not found')
+        created = now()
+        db.execute(
+            'INSERT INTO sekai_agents VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            (
+                agent_id,
+                cooperative_id,
+                payload.name,
+                payload.role,
+                payload.model_id,
+                _canonical_json({'items': payload.skills}),
+                payload.reputation,
+                0,
+                0,
+                'active',
+                created,
+                created,
+            ),
+        )
+        event = _emit_nexus_event(
+            db,
+            domain='sekai',
+            entity_type='agent',
+            entity_id=agent_id,
+            event_type='SEKAI_AGENT_REGISTERED',
+            payload={'cooperative_id': cooperative_id, **payload.model_dump()},
+            evidence=[{'source': 'sekai.agent.create'}],
+        )
+        db.commit()
+    _publish_nexus_event_if_possible(event)
+    with closing(connect()) as db:
+        row = row_dict(db.execute('SELECT * FROM sekai_agents WHERE agent_id = ?', (agent_id,)).fetchone()) or {}
+    return decode_json_fields(row, 'skills')
+
+
+@app.get('/nexus/sekai/cooperatives/{cooperative_id}/agents')
+def list_sekai_agents(cooperative_id: str) -> list[dict[str, Any]]:
+    with closing(connect()) as db:
+        require_cooperative(db, cooperative_id)
+        rows = db.execute('SELECT * FROM sekai_agents WHERE cooperative_id = ? ORDER BY reputation DESC, updated_at DESC', (cooperative_id,)).fetchall()
+        return [decode_json_fields(row_dict(row) or {}, 'skills') for row in rows]
+
+
+@app.post('/nexus/sekai/cooperatives/{cooperative_id}/jobs', status_code=201)
+def create_sekai_job(cooperative_id: str, payload: SekaiJobCreate) -> dict[str, Any]:
+    job_id = f'job_{uuid.uuid4().hex[:12]}'
+    budget = money(payload.budget)
+    with closing(connect()) as db:
+        require_cooperative(db, cooperative_id)
+        db.execute(
+            'INSERT INTO sekai_jobs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            (
+                job_id,
+                cooperative_id,
+                payload.title,
+                payload.task_type,
+                money_str(budget),
+                payload.minimum_quality,
+                'open',
+                None,
+                None,
+                None,
+                None,
+                now(),
+                None,
+            ),
+        )
+        event = _emit_nexus_event(
+            db,
+            domain='sekai',
+            entity_type='job',
+            entity_id=job_id,
+            event_type='SEKAI_JOB_CREATED',
+            payload={'cooperative_id': cooperative_id, **payload.model_dump()},
+            evidence=[{'source': 'sekai.job.create'}],
+        )
+        db.commit()
+    _publish_nexus_event_if_possible(event)
+    with closing(connect()) as db:
+        row = row_dict(db.execute('SELECT * FROM sekai_jobs WHERE job_id = ?', (job_id,)).fetchone()) or {}
+    return row
+
+
+@app.post('/nexus/sekai/jobs/{job_id}/bids', status_code=201)
+def submit_sekai_bid(job_id: str, payload: SekaiBidCreate) -> dict[str, Any]:
+    bid_id = f'bid_{uuid.uuid4().hex[:12]}'
+    expected_cost = money(payload.expected_cost)
+    with closing(connect()) as db:
+        job = require_job(db, job_id)
+        agent = require_agent(db, payload.agent_id)
+        if agent['cooperative_id'] != job['cooperative_id']:
+            raise HTTPException(409, 'agent must belong to the same cooperative as job')
+        if job['status'] != 'open':
+            raise HTTPException(409, f'job is not open for bids from status {job["status"]}')
+        model = db.execute('SELECT * FROM models WHERE id = ?', (payload.model_id,)).fetchone()
+        if not model:
+            raise HTTPException(422, 'model not found')
+        if job['task_type'] not in json.loads(model['task_types']):
+            raise HTTPException(422, 'model is not qualified for job task type')
+        if expected_cost > money(job['budget']):
+            raise HTTPException(409, 'bid exceeds job budget envelope')
+        if payload.expected_quality < job['minimum_quality']:
+            raise HTTPException(409, 'bid quality is below job minimum quality')
+        reputation_factor = max(float(agent['reputation']) / 100.0, 0.01)
+        latency_penalty = payload.latency_ms / 100000.0
+        score = ((payload.expected_quality * payload.confidence * reputation_factor) / max(float(expected_cost), 0.000001)) - latency_penalty
+        db.execute(
+            'INSERT INTO sekai_bids VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            (
+                bid_id,
+                job_id,
+                payload.agent_id,
+                payload.model_id,
+                money_str(expected_cost),
+                payload.expected_quality,
+                payload.confidence,
+                payload.latency_ms,
+                score,
+                'submitted',
+                now(),
+            ),
+        )
+        event = _emit_nexus_event(
+            db,
+            domain='sekai',
+            entity_type='bid',
+            entity_id=bid_id,
+            event_type='SEKAI_BID_SUBMITTED',
+            payload={'job_id': job_id, 'agent_id': payload.agent_id, 'model_id': payload.model_id, 'score': score},
+            evidence=[{'source': 'sekai.bid.submit'}],
+        )
+        db.commit()
+    _publish_nexus_event_if_possible(event)
+    with closing(connect()) as db:
+        row = row_dict(db.execute('SELECT * FROM sekai_bids WHERE bid_id = ?', (bid_id,)).fetchone()) or {}
+    return row
+
+
+@app.get('/nexus/sekai/jobs/{job_id}/bids')
+def list_sekai_bids(job_id: str) -> list[dict[str, Any]]:
+    with closing(connect()) as db:
+        require_job(db, job_id)
+        return [row_dict(row) or {} for row in db.execute('SELECT * FROM sekai_bids WHERE job_id = ? ORDER BY score DESC, created_at ASC', (job_id,)).fetchall()]
+
+
+@app.post('/nexus/sekai/jobs/{job_id}/select')
+def select_sekai_winner(job_id: str) -> dict[str, Any]:
+    with closing(connect()) as db:
+        job = require_job(db, job_id)
+        if job['status'] != 'open':
+            raise HTTPException(409, f'job cannot be selected from status {job["status"]}')
+        bids = db.execute('SELECT * FROM sekai_bids WHERE job_id = ? AND status = ?', (job_id, 'submitted')).fetchall()
+        if not bids:
+            raise HTTPException(409, 'no submitted bids for job')
+        winner = sorted(bids, key=lambda row: (-row['score'], row['created_at']))[0]
+        db.execute('UPDATE sekai_bids SET status = ? WHERE job_id = ? AND bid_id != ?', ('rejected', job_id, winner['bid_id']))
+        db.execute('UPDATE sekai_bids SET status = ? WHERE bid_id = ?', ('selected', winner['bid_id']))
+        db.execute('UPDATE sekai_jobs SET status = ?, selected_agent_id = ?, selected_bid_id = ? WHERE job_id = ?', ('selected', winner['agent_id'], winner['bid_id'], job_id))
+        event = _emit_nexus_event(
+            db,
+            domain='sekai',
+            entity_type='job',
+            entity_id=job_id,
+            event_type='SEKAI_DARWIN_WINNER_SELECTED',
+            payload={'bid_id': winner['bid_id'], 'agent_id': winner['agent_id'], 'model_id': winner['model_id'], 'score': winner['score']},
+            evidence=[{'source': 'sekai.job.select'}],
+        )
+        db.commit()
+    _publish_nexus_event_if_possible(event)
+    with closing(connect()) as db:
+        selected = row_dict(db.execute('SELECT * FROM sekai_jobs WHERE job_id = ?', (job_id,)).fetchone()) or {}
+        winner_row = row_dict(db.execute('SELECT * FROM sekai_bids WHERE bid_id = ?', (selected['selected_bid_id'],)).fetchone()) or {}
+    return {'job': selected, 'winner_bid': winner_row}
+
+
+@app.post('/nexus/sekai/jobs/{job_id}/settle', status_code=201)
+def settle_sekai_job(job_id: str, payload: SekaiSettleRequest) -> dict[str, Any]:
+    with closing(connect()) as db:
+        job = require_job(db, job_id)
+        if job['status'] != 'selected':
+            raise HTTPException(409, f'job cannot settle from status {job["status"]}')
+        cooperative = require_cooperative(db, job['cooperative_id'])
+        bid = db.execute('SELECT * FROM sekai_bids WHERE bid_id = ?', (job['selected_bid_id'],)).fetchone()
+        if not bid:
+            raise HTTPException(409, 'selected bid missing')
+
+    mission = create_mission(
+        MissionCreate(
+            wallet_id=cooperative['treasury_wallet_id'],
+            description=job['title'],
+            max_cost=job['budget'],
+            minimum_quality=float(job['minimum_quality']),
+            task_type=job['task_type'],
+        )
+    )
+
+    execution = execute(
+        ExecuteRequest(
+            mission_id=mission['id'],
+            model_id=bid['model_id'],
+            execution_id=payload.execution_id,
+            cpu_seconds=payload.cpu_seconds,
+            peak_memory_bytes=payload.peak_memory_bytes,
+            io_read_bytes=payload.io_read_bytes,
+            io_write_bytes=payload.io_write_bytes,
+            token_count=payload.token_count,
+            wall_seconds=payload.wall_seconds,
+            outcome=payload.outcome,
+            evidence={'settled_by': payload.actor, **payload.evidence},
+        )
+    )
+
+    with closing(connect()) as db:
+        job = require_job(db, job_id)
+        agent = require_agent(db, job['selected_agent_id'])
+        wins = int(agent['wins']) + (1 if payload.outcome == 'verified_success' else 0)
+        losses = int(agent['losses']) + (1 if payload.outcome == 'failed' else 0)
+        reputation = float(agent['reputation']) + (2.0 if payload.outcome == 'verified_success' else -3.0)
+        reputation = max(0.0, min(100.0, reputation))
+        db.execute('UPDATE sekai_agents SET wins = ?, losses = ?, reputation = ?, updated_at = ? WHERE agent_id = ?', (wins, losses, reputation, now(), agent['agent_id']))
+        db.execute('UPDATE sekai_jobs SET status = ?, mission_id = ?, execution_id = ?, resolved_at = ? WHERE job_id = ?', ('settled', mission['id'], payload.execution_id, now(), job_id))
+        event = _emit_nexus_event(
+            db,
+            domain='sekai',
+            entity_type='job',
+            entity_id=job_id,
+            event_type='SEKAI_JOB_SETTLED',
+            payload={'mission_id': mission['id'], 'execution_id': payload.execution_id, 'outcome': payload.outcome, 'agent_id': agent['agent_id'], 'updated_reputation': reputation},
+            evidence=[{'source': 'sekai.job.settle'}],
+        )
+        db.commit()
+    _publish_nexus_event_if_possible(event)
+
+    with closing(connect()) as db:
+        final_job = row_dict(db.execute('SELECT * FROM sekai_jobs WHERE job_id = ?', (job_id,)).fetchone()) or {}
+        final_agent = row_dict(db.execute('SELECT * FROM sekai_agents WHERE agent_id = ?', (final_job['selected_agent_id'],)).fetchone()) or {}
+        coop_wallet = row_dict(require_wallet(db, cooperative['treasury_wallet_id'])) or {}
+    return {'job': final_job, 'agent': final_agent, 'execution': execution, 'cooperative_wallet': coop_wallet}
+
+
+@app.get('/nexus/sekai/cooperatives/{cooperative_id}/scoreboard')
+def sekai_scoreboard(cooperative_id: str) -> dict[str, Any]:
+    with closing(connect()) as db:
+        cooperative = require_cooperative(db, cooperative_id)
+        wallet = row_dict(require_wallet(db, cooperative['treasury_wallet_id'])) or {}
+        agents = [row_dict(row) or {} for row in db.execute('SELECT * FROM sekai_agents WHERE cooperative_id = ? ORDER BY reputation DESC, wins DESC', (cooperative_id,)).fetchall()]
+        jobs = [row_dict(row) or {} for row in db.execute('SELECT * FROM sekai_jobs WHERE cooperative_id = ? ORDER BY created_at DESC', (cooperative_id,)).fetchall()]
+        completed = [job for job in jobs if job['status'] == 'settled']
+        return {'cooperative': row_dict(cooperative) or {}, 'treasury_wallet': wallet, 'agents': agents, 'jobs': jobs, 'metrics': {'total_jobs': len(jobs), 'settled_jobs': len(completed)}}
 
 
 @app.post('/micro/wallets/{agent_id}/fund')

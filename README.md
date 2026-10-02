@@ -123,6 +123,17 @@ Nexus extends the same FastAPI backend as the authoritative control plane:
   - `POST /nexus/mesh/outbound`
   - `POST /nexus/mesh/outbound/{queue_id}/reconcile`
   - `GET /nexus/mesh/outbound`
+- SEKAI cooperative + model Darwin:
+  - `POST /nexus/sekai/cooperatives`
+  - `GET /nexus/sekai/cooperatives`
+  - `POST /nexus/sekai/cooperatives/{cooperative_id}/agents`
+  - `GET /nexus/sekai/cooperatives/{cooperative_id}/agents`
+  - `POST /nexus/sekai/cooperatives/{cooperative_id}/jobs`
+  - `POST /nexus/sekai/jobs/{job_id}/bids`
+  - `GET /nexus/sekai/jobs/{job_id}/bids`
+  - `POST /nexus/sekai/jobs/{job_id}/select`
+  - `POST /nexus/sekai/jobs/{job_id}/settle`
+  - `GET /nexus/sekai/cooperatives/{cooperative_id}/scoreboard`
 
 Rollback commands are governed audit commands only; they do not mutate historical records directly.
 
