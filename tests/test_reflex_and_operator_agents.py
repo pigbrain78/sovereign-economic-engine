@@ -39,11 +39,21 @@ def test_self_healing_reflex_reacts_to_repeated_failures(monkeypatch):
     monkeypatch.setattr(agent, "_trigger_container_reboot", lambda: signals.__setitem__("rebooted", signals["rebooted"] + 1))
     monkeypatch.setattr(agent, "software_watchdog_ping", lambda: True)
 
-    for _ in range(3):
+    for _ in range(5):
         agent.log_task_execution(success=False)
 
     assert signals["dampened"] >= 1
-    assert signals["rebooted"] >= 1
+    assert signals["rebooted"] == 0
+
+
+def test_self_healing_reflex_reboots_on_watchdog_failure(monkeypatch):
+    agent = SelfHealingReflexAgent()
+    signals = {"rebooted": 0}
+    monkeypatch.setattr(agent, "_trigger_container_reboot", lambda: signals.__setitem__("rebooted", signals["rebooted"] + 1))
+    monkeypatch.setattr(agent, "software_watchdog_ping", lambda: False)
+
+    agent.log_task_execution(success=True)
+    assert signals["rebooted"] == 1
 
 
 def test_operator_worker_enforces_trust_expiry_and_scope():
