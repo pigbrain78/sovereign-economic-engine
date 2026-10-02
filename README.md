@@ -8,6 +8,7 @@ A runnable backend for governed, cost-aware AI work. The service combines the ve
 - **Synapse micro-billing**: integer micro-cent wallets, escrow, telemetry, expiration refunds, revenue splits, and deterministic settlement seals.
 - **Durable memory**: deduplicated memory records with a verifiable SQLite hash-chained provenance ledger.
 - **Pocket OS control plane**: projects, open improvement loops, advisory AI Shadow observations, evidence-backed proposals, human decision records, and a separate hash-chained control-plane event log.
+- **Hugging Face model layer**: interchangeable Inference Provider catalog, `cheapest`/`fastest`/`preferred` routing policies, verified-pricing quotes, and a server-side adapter that fails closed until provider credentials and wallet settlement are configured.
 - **Substrate utilities**: sandbox command construction, checkpoint validation, WAL-tail replay, deterministic canary routing, and latency metrics.
 
 The unverified external SAIL/DRQuinn packages are intentionally not in the execution path.
@@ -218,6 +219,27 @@ The current micro-billing engine is process-memory state. It is a tested referen
 
 Memory is informational only. It does not authorize execution.
 
+## Hugging Face model layer
+
+The Hugging Face layer keeps models interchangeable while preserving the economic boundary:
+
+```text
+Catalog → capability filter → quality floor → budget quote → wallet reservation → provider call → measured settlement
+```
+
+Routes:
+
+- `GET /hf/models`
+- `GET /hf/provider-status`
+- `POST /hf/quote`
+- `POST /hf/chat`
+
+The catalog contains candidate model IDs, capabilities, context windows, quality/reliability estimates, provider options, and pricing state. `POST /hf/quote` can select by `cheapest`, `fastest`, or `preferred` policy, but it always returns `execution_authorized: false` and `wallet_reservation_required: true`.
+
+Production pricing must be supplied through the server-only `HF_MODEL_PRICING_JSON` environment variable and verified against the active provider. Without verified rates, model selection fails closed. Provider calls also require `HF_TOKEN` and are disabled unless the explicit `HF_ALLOW_UNSETTLED_CHAT=true` integration flag is set; this flag is a temporary adapter-probe boundary, not a substitute for wallet reservation and settlement.
+
+The frontend never receives `HF_TOKEN`. Hugging Face's Inference Providers documentation supports model suffix policies such as `:cheapest`, `:fastest`, and `:preferred`; the adapter uses the OpenAI-compatible router endpoint for chat tasks. See [Inference Providers](https://huggingface.co/docs/inference-providers/en/index), [Pricing and Billing](https://huggingface.co/docs/inference-providers/en/pricing), and [Inference Endpoints](https://huggingface.co/docs/inference-endpoints/en/index).
+
 ## Validation
 
 ```bash
@@ -227,11 +249,11 @@ python3 -m compileall -q app tests
 pytest -q
 ```
 
-Current verified result: **14 passed**.
+Current verified result: **37 passed**.
 
 ## Production boundary
 
-This is a functioning integrated MVP, not a sealed production platform. Remaining work includes a trusted provider executor, direct resource measurement, durable micro-billing persistence, authentication and tenant isolation, Ed25519 capability authorization, strict RFC 8785/JCS integration, crash-safe multi-process settlement, a governed sandbox promotion path for generated code, and a real Pocket OS council/capability backend beyond the current explicit human-decision record.
+This is a functioning integrated MVP, not a sealed production platform. Remaining work includes wallet reservation/settlement wiring around the Hugging Face adapter, live provider pricing synchronization, trusted provider execution, direct resource measurement, durable micro-billing persistence, authentication and tenant isolation, Ed25519 capability authorization, strict RFC 8785/JCS integration, crash-safe multi-process settlement, a governed sandbox promotion path for generated code, and a real Pocket OS council/capability backend beyond the current explicit human-decision record.
 
 Core rule:
 

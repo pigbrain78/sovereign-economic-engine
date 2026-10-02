@@ -26,13 +26,14 @@ Establish the smallest executable system that makes the economic boundary real: 
 - Synapse micro-billing reference layer: integer micro-cent escrow, telemetry idempotency, expiry refund, conserved revenue splits, and deterministic proof seals.
 - Unified FastAPI surface: dollar wallet/routing/settlement, micro-billing escrow, and durable memory endpoints in one service.
 - Pocket OS control plane: project context, open loops, advisory Shadow observations, evidence-backed improvement proposals, human decision states, and a verified control-plane event chain.
+- Hugging Face model layer: interchangeable candidate catalog, capability/quality/budget selection, provider policy choices, verified-pricing quote contracts, and fail-closed server-side adapter boundary.
 
 ## Next phases
 
 1. Split `app/main.py` into domain modules with repositories and services, then replace the demo measurement payload with a real Axiom Forge/provider adapter.
 2. Add reservation idempotency, leases, fencing tokens, and crash recovery before external execution.
 3. Add task profiling and capability matching beyond the current quality/cost filter.
-4. Add provider adapters for Hugging Face Inference Providers and local sandbox execution.
+4. Complete the Hugging Face Inference Providers adapter with wallet reservation, measured usage settlement, receipt persistence, live pricing synchronization, and local sandbox fallback.
 5. Add outcome verification and economic-memory learning from actual cost and quality.
 6. Add governance policies for risk classes, human review, prohibited capabilities, and model lifecycle admission.
 7. Add a thin operator UI after the API contract stabilizes.

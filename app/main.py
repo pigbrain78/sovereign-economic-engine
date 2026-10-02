@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import os
 import sqlite3
 import uuid
 from contextlib import closing
@@ -16,6 +17,7 @@ from pydantic import BaseModel, Field
 from app.substrate import PricingPolicy, ResourceUsage
 from app.memory import MemoryAPI
 from app.micro_billing import MetricType, SplitRevenueContract, SplitRule, SynapseMicroBillingEngine, TelemetryEvent
+from app.huggingface_layer import HuggingFaceProviderUnavailable, ModelPolicyViolation, HuggingFaceChatAdapter, catalog as hf_catalog, quote_model as hf_quote_model, select_model as hf_select_model
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = Path(__import__('os').environ.get('SOVEREIGN_DB', BASE_DIR / 'sovereign.db'))
@@ -332,6 +334,23 @@ class ProposalApproval(BaseModel):
     actor: str = Field(min_length=1)
 
 
+class HuggingFaceQuoteRequest(BaseModel):
+    capabilities: list[str] = Field(min_length=1)
+    input_tokens: int = Field(ge=0)
+    output_tokens: int = Field(ge=0)
+    max_cost: str = Field(pattern=r'^\d+(\.\d{1,6})?$')
+    minimum_quality: float = Field(default=0, ge=0, le=1)
+    routing_policy: str = Field(default='cheapest', pattern=r'^(cheapest|fastest|preferred)$')
+    preferred_providers: list[str] = Field(default_factory=list)
+    model_id: str | None = None
+
+
+class HuggingFaceChatRequest(HuggingFaceQuoteRequest):
+    messages: list[dict[str, str]] = Field(min_length=1)
+    max_tokens: int = Field(default=512, gt=0, le=8192)
+    provider: str | None = None
+
+
 def row_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
     return dict(row) if row else None
 
@@ -389,6 +408,8 @@ def health() -> dict[str, Any]:
     memory_health = MEMORY.health()
     with closing(connect()) as db:
         pocket_ledger_verified = verify_pocket_events(db)
+    hf_models = hf_catalog()
+    hf_ready = bool(os.environ.get('HF_TOKEN')) and any(model.pricing_verified for model in hf_models)
     return {
         'status': 'ok' if memory_health['ledger_verified'] and pocket_ledger_verified else 'degraded',
         'service': 'sovereign-economic-engine',
@@ -397,7 +418,7 @@ def health() -> dict[str, Any]:
             'micro_billing': 'ready_in_process_memory',
             'memory': memory_health,
             'pocket_os': {'status': 'ok', 'event_ledger_verified': pocket_ledger_verified},
-            'external_model_executor': 'not_connected',
+            'external_model_executor': 'huggingface_ready' if hf_ready else 'huggingface_config_required',
         },
     }
 
@@ -559,6 +580,90 @@ def list_models() -> list[dict[str, Any]]:
     with closing(connect()) as db:
         rows = db.execute("SELECT * FROM models WHERE status = 'qualified' ORDER BY cost_per_task ASC").fetchall()
         return [row_dict(row) or {} for row in rows]
+
+
+@app.get('/hf/models')
+def list_huggingface_models(capability: str | None = None) -> dict[str, Any]:
+    models = hf_catalog(capability)
+    return {
+        'source': 'huggingface_inference_providers',
+        'routing_policies': ['cheapest', 'fastest', 'preferred'],
+        'models': [model.as_dict() for model in models],
+        'note': 'Rates are blocked until HF_MODEL_PRICING_JSON contains verified operator pricing.' if not any(model.pricing_verified for model in models) else 'Pricing is configured from operator-supplied rates; confirm against the active provider before production use.',
+    }
+
+
+@app.get('/hf/provider-status')
+def huggingface_provider_status() -> dict[str, Any]:
+    models = hf_catalog()
+    return {
+        'provider': 'huggingface_inference_providers',
+        'endpoint': HuggingFaceChatAdapter.endpoint,
+        'token_configured': bool(os.environ.get('HF_TOKEN')),
+        'verified_priced_models': sum(model.pricing_verified for model in models),
+        'catalog_size': len(models),
+        'execution_status': 'ready' if os.environ.get('HF_TOKEN') and any(model.pricing_verified for model in models) else 'fail_closed_configuration_required',
+        'secrets_are_server_side': True,
+    }
+
+
+@app.post('/hf/quote')
+def quote_huggingface_model(payload: HuggingFaceQuoteRequest) -> dict[str, Any]:
+    try:
+        maximum = money(payload.max_cost)
+        selected, estimated_cost, alternatives = hf_select_model(capabilities=payload.capabilities, input_tokens=payload.input_tokens, output_tokens=payload.output_tokens, max_cost=maximum, minimum_quality=payload.minimum_quality, routing_policy=payload.routing_policy, preferred_providers=payload.preferred_providers, model_id=payload.model_id)
+    except (ValueError, ModelPolicyViolation) as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {
+        'status': 'QUOTED',
+        'selected_model': selected.as_dict(),
+        'routing_policy': payload.routing_policy,
+        'estimated_cost': money_str(estimated_cost),
+        'input_tokens': payload.input_tokens,
+        'output_tokens': payload.output_tokens,
+        'alternatives': alternatives,
+        'execution_authorized': False,
+        'wallet_reservation_required': True,
+        'note': 'A quote is not an execution authorization. Reserve and settle through a governed mission before calling a provider.',
+    }
+
+
+@app.post('/hf/chat')
+def huggingface_chat(payload: HuggingFaceChatRequest) -> dict[str, Any]:
+    if os.environ.get('HF_ALLOW_UNSETTLED_CHAT') != 'true':
+        raise HTTPException(403, 'unsettled provider calls are disabled; integrate wallet reservation and settlement before enabling HF_ALLOW_UNSETTLED_CHAT')
+    try:
+        maximum = money(payload.max_cost)
+        selected, estimated_cost, alternatives = hf_select_model(capabilities=payload.capabilities, input_tokens=payload.input_tokens, output_tokens=payload.output_tokens, max_cost=maximum, minimum_quality=payload.minimum_quality, routing_policy=payload.routing_policy, preferred_providers=payload.preferred_providers, model_id=payload.model_id)
+    except (ValueError, ModelPolicyViolation) as exc:
+        raise HTTPException(422, str(exc)) from exc
+    try:
+        result = HuggingFaceChatAdapter().chat(selected, payload.messages, routing_policy=payload.routing_policy, provider=payload.provider, max_tokens=payload.max_tokens)
+    except HuggingFaceProviderUnavailable as exc:
+        raise HTTPException(503, str(exc)) from exc
+    usage = result.get('usage') if isinstance(result.get('usage'), dict) else {}
+    input_tokens = int(usage.get('prompt_tokens', payload.input_tokens))
+    output_tokens = int(usage.get('completion_tokens', payload.output_tokens))
+    try:
+        actual_cost = hf_quote_model(selected, input_tokens, output_tokens)
+    except ModelPolicyViolation as exc:
+        raise HTTPException(422, str(exc)) from exc
+    if actual_cost > maximum:
+        raise HTTPException(502, 'provider usage exceeded the quoted economic envelope; no settlement was recorded')
+    return {
+        'status': 'PROVIDER_RESPONSE',
+        'selected_model': selected.as_dict(),
+        'routing_policy': payload.routing_policy,
+        'estimated_cost': money_str(estimated_cost),
+        'actual_cost': money_str(actual_cost),
+        'usage': usage,
+        'latency_ms': result.get('latency_ms'),
+        'response': result.get('message'),
+        'alternatives': alternatives,
+        'execution_authorized': False,
+        'settlement_required': True,
+        'note': 'Provider response returned for a governed executor; wallet reservation and settlement remain a separate required step.',
+    }
 
 
 @app.post('/missions', status_code=201)
