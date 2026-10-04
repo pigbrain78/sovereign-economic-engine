@@ -256,6 +256,14 @@ This is a safe reference promotion layer, not a container or VM boundary. It doe
 
 Memory is informational only. It does not authorize execution.
 
+## First hero workflow: thought capture
+
+`POST /capture` turns a text thought into a durable memory record, a planned mission, and a bounded execution envelope. The request requires a wallet, privacy mode (`local_only`, `user_server`, or `approved_external`), task type, maximum cost, capabilities, and minimum quality. The response includes a deterministic quote hash and idempotency key.
+
+Capture is deliberately non-executing: it does not call a model, reserve funds, or authorize a provider. It returns `execution_authorized: false`, `escrow_reserved: false`, and `AWAITING_EXECUTION` until a governed executor is connected. Repeating the same capture is idempotent and does not create another mission or charge.
+
+The Pocket OS frontend exposes this at `/capture` as **Thought Capture**. The user can enter a project-improvement thought, choose privacy residency, set a maximum budget, and inspect the resulting memory, mission, envelope, quote hash, and expiry.
+
 ## Hugging Face model layer
 
 The Hugging Face layer keeps models interchangeable while preserving the economic boundary:
@@ -286,7 +294,7 @@ python3 -m compileall -q app tests
 pytest -q
 ```
 
-Current verified result: **42 passed**.
+Current verified result: **45 passed**.
 
 ## Production boundary
 

@@ -6,7 +6,7 @@ import os
 import sqlite3
 import uuid
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -146,6 +146,23 @@ def init_db() -> None:
             amount TEXT NOT NULL,
             previous_event_hash TEXT NOT NULL,
             event_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS execution_envelopes (
+            envelope_id TEXT PRIMARY KEY,
+            mission_id TEXT NOT NULL UNIQUE REFERENCES missions(id),
+            memory_id TEXT NOT NULL,
+            wallet_id TEXT NOT NULL REFERENCES wallets(id),
+            privacy_mode TEXT NOT NULL,
+            runtime_policy TEXT NOT NULL,
+            task_type TEXT NOT NULL,
+            max_cost TEXT NOT NULL,
+            minimum_quality REAL NOT NULL,
+            capabilities TEXT NOT NULL,
+            quote_hash TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
             created_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS pocket_projects (
@@ -341,6 +358,18 @@ class MissionCreate(BaseModel):
     max_cost: str = Field(pattern=r'^\d+(\.\d{1,6})?$')
     minimum_quality: float = Field(ge=0, le=1)
     task_type: str = 'general'
+
+
+class ThoughtCaptureRequest(BaseModel):
+    wallet_id: str
+    content: str = Field(min_length=1, max_length=20000)
+    task_type: str = Field(default='project_improvement', min_length=1, max_length=80)
+    max_cost: str = Field(default='0.050000', pattern=r'^\d+(\.\d{1,6})?$')
+    minimum_quality: float = Field(default=0.5, ge=0, le=1)
+    privacy_mode: str = Field(default='local_only', pattern=r'^(local_only|user_server|approved_external)$')
+    capabilities: list[str] = Field(default_factory=lambda: ['project_analysis'])
+    project_id: str | None = None
+    actor: str = Field(default='operator', min_length=1, max_length=120)
 
 
 class ExecuteRequest(BaseModel):
@@ -1216,6 +1245,50 @@ def memory_search(payload: MemorySearchRequest) -> list[dict[str, Any]]:
         return MEMORY.search(payload.query, payload.top_k)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+
+
+@app.post('/capture', status_code=201)
+def capture_thought(payload: ThoughtCaptureRequest) -> dict[str, Any]:
+    """Capture a thought and create a bounded, non-executing mission envelope."""
+    try:
+        max_cost = money(payload.max_cost)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    if max_cost <= 0:
+        raise HTTPException(422, 'max_cost must be greater than zero')
+    runtime_policy = {'local_only': 'local', 'user_server': 'user_server', 'approved_external': 'approved_external'}[payload.privacy_mode]
+    memory = MEMORY.remember(payload.content, memory_type='thought_capture', source_id='capture', actor=payload.actor)
+    mission_id = f'mission_{uuid.uuid4().hex[:12]}'
+    envelope_id = f'envelope_{uuid.uuid4().hex[:12]}'
+    idempotency_key = hashlib.sha256(f'{memory["content_hash"]}:{payload.wallet_id}:{payload.task_type}'.encode()).hexdigest()
+    quote_body = {'capabilities': sorted(payload.capabilities), 'max_cost': money_str(max_cost), 'minimum_quality': payload.minimum_quality, 'privacy_mode': payload.privacy_mode, 'task_type': payload.task_type}
+    quote_hash = hashlib.sha256(json.dumps(quote_body, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
+    created_at = now()
+    expires_at = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    with closing(connect()) as db:
+        wallet = require_wallet(db, payload.wallet_id)
+        if payload.project_id:
+            require_project(db, payload.project_id)
+        existing = db.execute('SELECT * FROM execution_envelopes WHERE idempotency_key = ?', (idempotency_key,)).fetchone()
+        if existing:
+            mission = db.execute('SELECT * FROM missions WHERE id = ?', (existing['mission_id'],)).fetchone()
+            return {'memory': memory, 'mission': row_dict(mission) or {}, 'envelope': row_dict(existing) or {}, 'idempotent_replay': True, 'execution_authorized': False, 'escrow_reserved': False}
+        db.execute('INSERT INTO missions (id, wallet_id, description, max_cost, minimum_quality, task_type, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', (mission_id, wallet['id'], payload.content, money_str(max_cost), payload.minimum_quality, payload.task_type, 'planned', created_at))
+        db.execute('INSERT INTO execution_envelopes (envelope_id,mission_id,memory_id,wallet_id,privacy_mode,runtime_policy,task_type,max_cost,minimum_quality,capabilities,quote_hash,idempotency_key,status,expires_at,created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', (envelope_id, mission_id, memory['memory_id'], wallet['id'], payload.privacy_mode, runtime_policy, payload.task_type, money_str(max_cost), payload.minimum_quality, json.dumps(sorted(payload.capabilities)), quote_hash, idempotency_key, 'AWAITING_EXECUTION', expires_at, created_at))
+        db.commit()
+        envelope = row_dict(db.execute('SELECT * FROM execution_envelopes WHERE envelope_id = ?', (envelope_id,)).fetchone()) or {}
+        mission = row_dict(db.execute('SELECT * FROM missions WHERE id = ?', (mission_id,)).fetchone()) or {}
+        return {'memory': memory, 'mission': mission, 'envelope': envelope, 'execution_authorized': False, 'escrow_reserved': False, 'note': 'Thought captured. No model or provider was called; execution requires a governed reservation and an eligible executor.'}
+
+
+@app.get('/capture/{envelope_id}')
+def get_capture(envelope_id: str) -> dict[str, Any]:
+    with closing(connect()) as db:
+        envelope = db.execute('SELECT * FROM execution_envelopes WHERE envelope_id = ?', (envelope_id,)).fetchone()
+        if not envelope:
+            raise HTTPException(404, 'capture envelope not found')
+        mission = db.execute('SELECT * FROM missions WHERE id = ?', (envelope['mission_id'],)).fetchone()
+        return {'memory': MEMORY.get(envelope['memory_id']), 'mission': row_dict(mission) or {}, 'envelope': row_dict(envelope) or {}, 'execution_authorized': False, 'escrow_reserved': False}
 
 
 @app.get('/memory/health')
