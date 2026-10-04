@@ -92,6 +92,18 @@ Ledger records the evidence
 
 The current service does not execute a model provider itself. `/executions` is the boundary where a future trusted provider adapter will submit measurements.
 
+## Local executor boundary
+
+Captured `local_only` envelopes can be sent to `POST /capture/{envelope_id}/execute-local` only when an operator configures `LOCAL_EXECUTOR_COMMAND_JSON` as a JSON string array, for example:
+
+```bash
+export LOCAL_EXECUTOR_COMMAND_JSON='["python3","-c","import sys; print(sys.stdin.read())"]'
+```
+
+The engine reserves the envelope maximum before starting the command, passes the captured thought over stdin, measures wall time and I/O, prices the measured result, then settles the actual amount or refunds the reservation. Reusing an `execution_id` returns the prior receipt without running the command again. Non-local privacy modes are rejected, and an unconfigured executor fails closed at `503`.
+
+This adapter is a **process boundary only**, not a security sandbox. It does not provide VM/container isolation, model weights, or a trusted code-execution boundary. A production local-AI runtime still needs a hardened sandbox, resource enforcement, authentication, and crash-safe reservation recovery.
+
 ## Dollar-wallet API sequence
 
 1. `POST /wallets`
@@ -294,7 +306,7 @@ python3 -m compileall -q app tests
 pytest -q
 ```
 
-Current verified result: **45 passed**.
+Current verified result: **48 passed**.
 
 ## Production boundary
 

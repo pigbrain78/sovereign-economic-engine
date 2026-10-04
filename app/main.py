@@ -20,6 +20,7 @@ from app.micro_billing import MetricType, SplitRevenueContract, SplitRule, Synap
 from app.huggingface_layer import HuggingFaceProviderUnavailable, ModelPolicyViolation, HuggingFaceChatAdapter, catalog as hf_catalog, quote_model as hf_quote_model, select_model as hf_select_model
 from app.upgrade_treasury import RDPFitnessMetric, ReserveRates, ScenarioPath, ScenarioSimulator, UpgradeStatus, canonical_approval_payload, verify_ed25519_signature
 from app.sandbox_promotion import SandboxPromotion, SandboxRejected
+from app.local_executor import LocalCommandExecutor, LocalExecutorUnavailable
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = Path(__import__('os').environ.get('SOVEREIGN_DB', BASE_DIR / 'sovereign.db'))
@@ -163,6 +164,18 @@ def init_db() -> None:
             idempotency_key TEXT NOT NULL UNIQUE,
             status TEXT NOT NULL,
             expires_at TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS local_executions (
+            execution_id TEXT PRIMARY KEY,
+            envelope_id TEXT NOT NULL REFERENCES execution_envelopes(envelope_id),
+            mission_id TEXT NOT NULL REFERENCES missions(id),
+            reservation_id TEXT,
+            status TEXT NOT NULL,
+            output TEXT NOT NULL,
+            stderr TEXT NOT NULL,
+            usage TEXT NOT NULL,
+            amount TEXT NOT NULL,
             created_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS pocket_projects (
@@ -370,6 +383,11 @@ class ThoughtCaptureRequest(BaseModel):
     capabilities: list[str] = Field(default_factory=lambda: ['project_analysis'])
     project_id: str | None = None
     actor: str = Field(default='operator', min_length=1, max_length=120)
+
+
+class LocalExecuteRequest(BaseModel):
+    execution_id: str = Field(min_length=1, max_length=160)
+    timeout_seconds: float = Field(default=30, gt=0, le=120)
 
 
 class ExecuteRequest(BaseModel):
@@ -1289,6 +1307,71 @@ def get_capture(envelope_id: str) -> dict[str, Any]:
             raise HTTPException(404, 'capture envelope not found')
         mission = db.execute('SELECT * FROM missions WHERE id = ?', (envelope['mission_id'],)).fetchone()
         return {'memory': MEMORY.get(envelope['memory_id']), 'mission': row_dict(mission) or {}, 'envelope': row_dict(envelope) or {}, 'execution_authorized': False, 'escrow_reserved': False}
+
+
+@app.get('/local-executor/status')
+def local_executor_status() -> dict[str, Any]:
+    try:
+        return LocalCommandExecutor().status()
+    except LocalExecutorUnavailable as exc:
+        return {'configured': False, 'runtime': 'local_command', 'isolation': 'process_boundary_only', 'error': str(exc)}
+
+
+@app.post('/capture/{envelope_id}/execute-local')
+def execute_capture_locally(envelope_id: str, payload: LocalExecuteRequest) -> dict[str, Any]:
+    try:
+        executor = LocalCommandExecutor(timeout_seconds=payload.timeout_seconds)
+    except LocalExecutorUnavailable as exc:
+        raise HTTPException(503, str(exc)) from exc
+    if not executor.command:
+        raise HTTPException(503, 'no local executor configured; set LOCAL_EXECUTOR_COMMAND_JSON')
+    with closing(connect()) as db:
+        prior = db.execute('SELECT * FROM local_executions WHERE execution_id = ?', (payload.execution_id,)).fetchone()
+        if prior:
+            return {'execution_id': payload.execution_id, 'envelope_id': prior['envelope_id'], 'status': prior['status'], 'output': prior['output'], 'stderr': prior['stderr'], 'usage': json.loads(prior['usage']), 'amount': prior['amount'], 'idempotent_replay': True, 'execution_authorized': True}
+        envelope = db.execute('SELECT * FROM execution_envelopes WHERE envelope_id = ?', (envelope_id,)).fetchone()
+        if not envelope:
+            raise HTTPException(404, 'capture envelope not found')
+        if envelope['privacy_mode'] != 'local_only':
+            raise HTTPException(403, 'local executor is only eligible for local_only envelopes')
+        if envelope['status'] != 'AWAITING_EXECUTION':
+            raise HTTPException(409, f'envelope is not executable from status {envelope["status"]}')
+        mission = db.execute('SELECT * FROM missions WHERE id = ?', (envelope['mission_id'],)).fetchone()
+        wallet = require_wallet(db, envelope['wallet_id'])
+        reservation_amount = money(envelope['max_cost'])
+        available = money(wallet['available'])
+        minimum = money(wallet['minimum_liquidity'])
+        if available - reservation_amount < minimum:
+            raise HTTPException(403, 'reservation would violate minimum liquidity protection')
+        reservation_id = f'local_reservation_{uuid.uuid4().hex[:12]}'
+        db.execute('INSERT INTO reservations VALUES (?, ?, ?, ?, ?, ?, ?)', (reservation_id, wallet['id'], mission['id'], money_str(reservation_amount), 'reserved', now(), None))
+        db.execute('UPDATE wallets SET available = ?, reserved = ? WHERE id = ?', (money_str(available - reservation_amount), money_str(money(wallet['reserved']) + reservation_amount), wallet['id']))
+        ledger(db, wallet['id'], 'reserve', reservation_amount, mission_id=mission['id'], reservation_id=reservation_id, metadata={'execution_id': payload.execution_id, 'runtime': 'local'})
+        db.commit()
+        memory = MEMORY.get(envelope['memory_id'])
+        prompt = memory['content'] if memory else ''
+    result = executor.execute(prompt)
+    usage_obj = ResourceUsage(Decimal(str(result.duration_seconds)), 0, result.input_bytes, result.output_bytes, result.token_count, Decimal(str(result.duration_seconds)))
+    actual = money(PricingPolicy().price(usage_obj)) if result.status == 'SUCCESS' else Decimal('0.000000')
+    success = result.status == 'SUCCESS' and actual <= reservation_amount
+    if result.status == 'SUCCESS' and actual > reservation_amount:
+        result = result.__class__(result.status, result.output, 'measured cost exceeded the execution envelope', result.duration_seconds, result.input_bytes, result.output_bytes, result.token_count)
+    with closing(connect()) as db:
+        wallet = require_wallet(db, envelope['wallet_id'])
+        unused = reservation_amount - actual
+        db.execute('UPDATE reservations SET status = ?, settled_at = ? WHERE id = ?', ('settled' if success else 'refunded', now(), reservation_id))
+        db.execute('UPDATE wallets SET available = ?, reserved = ?, spent = ? WHERE id = ?', (money_str(money(wallet['available']) + unused), money_str(money(wallet['reserved']) - reservation_amount), money_str(money(wallet['spent']) + actual), wallet['id']))
+        event = 'outcome' if success else 'failure'
+        ledger(db, wallet['id'], event, actual, mission_id=envelope['mission_id'], reservation_id=reservation_id, metadata={'execution_id': payload.execution_id, 'runtime': 'local', 'usage': usage_obj.as_dict(), 'status': result.status})
+        if unused:
+            ledger(db, wallet['id'], 'release', unused, mission_id=envelope['mission_id'], reservation_id=reservation_id, metadata={'execution_id': payload.execution_id, 'runtime': 'local'})
+        final_status = 'COMPLETED' if success else 'FAILED'
+        db.execute('UPDATE missions SET status = ? WHERE id = ?', ('completed' if success else 'failed', envelope['mission_id']))
+        db.execute('UPDATE execution_envelopes SET status = ? WHERE envelope_id = ?', (final_status, envelope_id))
+        db.execute('INSERT INTO local_executions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', (payload.execution_id, envelope_id, envelope['mission_id'], reservation_id, 'SETTLED' if success else 'REFUNDED', result.output, result.stderr, json.dumps(usage_obj.as_dict(), sort_keys=True), money_str(actual), now()))
+        db.commit()
+        final_wallet = row_dict(db.execute('SELECT * FROM wallets WHERE id = ?', (wallet['id'],)).fetchone()) or {}
+        return {'execution_id': payload.execution_id, 'envelope_id': envelope_id, 'status': final_status, 'output': result.output, 'stderr': result.stderr, 'usage': usage_obj.as_dict(), 'amount': money_str(actual), 'wallet': final_wallet, 'execution_authorized': True, 'escrow_reserved': False, 'note': 'Local process execution completed. This adapter is process-boundary only, not a security sandbox.'}
 
 
 @app.get('/memory/health')

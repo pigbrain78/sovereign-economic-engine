@@ -61,12 +61,12 @@ class SubprocessDriver:
 
     isolation_level = "process_boundary_only"
 
-    def execute(self, command: list[str], timeout_s: float = 5.0) -> SandboxExecutionResult:
+    def execute(self, command: list[str], timeout_s: float = 5.0, input_text: str | None = None) -> SandboxExecutionResult:
         if not command or timeout_s <= 0:
             raise ValueError("command and positive timeout are required")
         start = time.perf_counter()
         try:
-            result = subprocess.run(command, capture_output=True, text=True, timeout=timeout_s, check=False)
+            result = subprocess.run(command, input=input_text, capture_output=True, text=True, timeout=timeout_s, check=False)
             return SandboxExecutionResult(result.returncode, result.stdout, result.stderr, (time.perf_counter() - start) * 1000, False)
         except subprocess.TimeoutExpired as exc:
             return SandboxExecutionResult(-1, exc.stdout or "", exc.stderr or "Execution timed out.", (time.perf_counter() - start) * 1000, True)
