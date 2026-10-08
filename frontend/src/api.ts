@@ -24,7 +24,8 @@ export type HFModel = { model_id: string; display_name: string; capabilities: st
 export type HFProviderStatus = { provider: string; endpoint: string; token_configured: boolean; verified_priced_models: number; catalog_size: number; execution_status: string; secrets_are_server_side: boolean }
 export type HFQuote = { status: string; selected_model: HFModel; routing_policy: string; estimated_cost: string; input_tokens: number; output_tokens: number; alternatives: { model_id: string; estimated_cost: string; quality_score: number; latency_ms: number }[]; execution_authorized: false; wallet_reservation_required: true; note: string }
 export type CaptureResult = { memory: { memory_id: string; content: string; memory_type: string; content_hash: string; created_at: string }; mission: { id: string; description: string; max_cost: string; task_type: string; status: string }; envelope: { envelope_id: string; privacy_mode: string; runtime_policy: string; max_cost: string; capabilities: string; quote_hash: string; status: string; expires_at: string; idempotency_key: string }; execution_authorized: false; escrow_reserved: false; note?: string; idempotent_replay?: boolean }
-export type LocalExecution = { execution_id: string; envelope_id: string; status: string; output: string; stderr: string; usage: Record<string, string | number>; amount: string; execution_authorized: boolean; escrow_reserved: boolean; note?: string; idempotent_replay?: boolean; wallet?: Wallet }
+export type LocalExecution = { execution_id: string; envelope_id: string; model_id?: string; runtime?: string; status: string; output: string; stderr: string; usage: Record<string, string | number>; amount: string; execution_authorized: boolean; escrow_reserved: boolean; note?: string; idempotent_replay?: boolean; wallet?: Wallet }
+export type LocalModels = { runtime: string; cloud_calls: boolean; configured: boolean; models: Array<Record<string, unknown>>; note: string }
 
 const defaultBase = 'https://8000-inn0u6a8zgt70vdzkc85q-e5a55957.us1.manus.computer'
 export const getApiBase = () => localStorage.getItem('pocket_api_base') || import.meta.env.VITE_API_BASE_URL || defaultBase
@@ -61,5 +62,6 @@ export const api = {
   hfQuote: (body: { capabilities: string[]; input_tokens: number; output_tokens: number; max_cost: string; minimum_quality?: number; routing_policy?: string; preferred_providers?: string[]; model_id?: string }) => request<HFQuote>('/hf/quote', { method: 'POST', body: JSON.stringify(body) }),
   capture: (body: { wallet_id: string; content: string; task_type?: string; max_cost?: string; minimum_quality?: number; privacy_mode: 'local_only' | 'user_server' | 'approved_external'; capabilities?: string[]; actor?: string }) => request<CaptureResult>('/capture', { method: 'POST', body: JSON.stringify(body) }),
   captureById: (envelopeId: string) => request<CaptureResult>(`/capture/${encodeURIComponent(envelopeId)}`),
-  executeLocal: (envelopeId: string, executionId: string) => request<LocalExecution>(`/capture/${encodeURIComponent(envelopeId)}/execute-local`, { method: 'POST', body: JSON.stringify({ execution_id: executionId }) }),
+  localModels: () => request<LocalModels>('/local-models'),
+  executeLocal: (envelopeId: string, executionId: string, modelId?: string) => request<LocalExecution>(`/capture/${encodeURIComponent(envelopeId)}/execute-local`, { method: 'POST', body: JSON.stringify({ execution_id: executionId, model_id: modelId }) }),
 }

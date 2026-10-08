@@ -32,6 +32,8 @@ def test_local_execution_reserves_settles_and_replays():
     assert response.status_code == 200
     body = response.json()
     assert body['status'] == 'COMPLETED'
+    assert body['model_id'] == 'local-command'
+    assert body['runtime'] == 'command'
     assert body['execution_authorized'] is True
     assert body['escrow_reserved'] is False
     assert body['output'].startswith('LOCAL_RESULT:Analyze my test suite')

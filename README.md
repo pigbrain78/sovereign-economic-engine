@@ -104,6 +104,15 @@ The engine reserves the envelope maximum before starting the command, passes the
 
 This adapter is a **process boundary only**, not a security sandbox. It does not provide VM/container isolation, model weights, or a trusted code-execution boundary. A production local-AI runtime still needs a hardened sandbox, resource enforcement, authentication, and crash-safe reservation recovery.
 
+### Provider-neutral local model layer
+
+`app/local_model.py` provides one model-selection contract for local runtimes. The current adapters are:
+
+- `local-command`: wraps the explicit `LOCAL_EXECUTOR_COMMAND_JSON` process adapter.
+- `Ollama`: optional local HTTP inference through `LOCAL_OLLAMA_MODEL` and `LOCAL_OLLAMA_BASE_URL` (default `http://127.0.0.1:11434`).
+
+Inspect available local models with `GET /local-models`. Pass a specific `model_id` to the local execution request when more than one adapter is configured. If no local adapter is available, selection fails closed; the system never silently falls back to Hugging Face or another cloud provider.
+
 ## Dollar-wallet API sequence
 
 1. `POST /wallets`

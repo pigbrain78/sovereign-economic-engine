@@ -21,6 +21,7 @@ from app.huggingface_layer import HuggingFaceProviderUnavailable, ModelPolicyVio
 from app.upgrade_treasury import RDPFitnessMetric, ReserveRates, ScenarioPath, ScenarioSimulator, UpgradeStatus, canonical_approval_payload, verify_ed25519_signature
 from app.sandbox_promotion import SandboxPromotion, SandboxRejected
 from app.local_executor import LocalCommandExecutor, LocalExecutorUnavailable
+from app.local_model import LocalModelUnavailable, local_model_status, select_local_model
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = Path(__import__('os').environ.get('SOVEREIGN_DB', BASE_DIR / 'sovereign.db'))
@@ -387,6 +388,7 @@ class ThoughtCaptureRequest(BaseModel):
 
 class LocalExecuteRequest(BaseModel):
     execution_id: str = Field(min_length=1, max_length=160)
+    model_id: str | None = Field(default=None, max_length=160)
     timeout_seconds: float = Field(default=30, gt=0, le=120)
 
 
@@ -1317,14 +1319,17 @@ def local_executor_status() -> dict[str, Any]:
         return {'configured': False, 'runtime': 'local_command', 'isolation': 'process_boundary_only', 'error': str(exc)}
 
 
+@app.get('/local-models')
+def local_models() -> dict[str, Any]:
+    return local_model_status()
+
+
 @app.post('/capture/{envelope_id}/execute-local')
 def execute_capture_locally(envelope_id: str, payload: LocalExecuteRequest) -> dict[str, Any]:
     try:
-        executor = LocalCommandExecutor(timeout_seconds=payload.timeout_seconds)
-    except LocalExecutorUnavailable as exc:
+        adapter = select_local_model(payload.model_id)
+    except (LocalExecutorUnavailable, LocalModelUnavailable) as exc:
         raise HTTPException(503, str(exc)) from exc
-    if not executor.command:
-        raise HTTPException(503, 'no local executor configured; set LOCAL_EXECUTOR_COMMAND_JSON')
     with closing(connect()) as db:
         prior = db.execute('SELECT * FROM local_executions WHERE execution_id = ?', (payload.execution_id,)).fetchone()
         if prior:
@@ -1350,7 +1355,16 @@ def execute_capture_locally(envelope_id: str, payload: LocalExecuteRequest) -> d
         db.commit()
         memory = MEMORY.get(envelope['memory_id'])
         prompt = memory['content'] if memory else ''
-    result = executor.execute(prompt)
+    try:
+        result = adapter.execute(prompt, payload.timeout_seconds)
+    except LocalModelUnavailable as exc:
+        with closing(connect()) as db:
+            wallet = require_wallet(db, envelope['wallet_id'])
+            db.execute('UPDATE reservations SET status = ?, settled_at = ? WHERE id = ?', ('refunded', now(), reservation_id))
+            db.execute('UPDATE wallets SET available = ?, reserved = ? WHERE id = ?', (money_str(money(wallet['available']) + reservation_amount), money_str(money(wallet['reserved']) - reservation_amount), wallet['id']))
+            ledger(db, wallet['id'], 'release', reservation_amount, mission_id=envelope['mission_id'], reservation_id=reservation_id, metadata={'execution_id': payload.execution_id, 'runtime': 'local', 'reason': str(exc)})
+            db.commit()
+        raise HTTPException(502, str(exc)) from exc
     usage_obj = ResourceUsage(Decimal(str(result.duration_seconds)), 0, result.input_bytes, result.output_bytes, result.token_count, Decimal(str(result.duration_seconds)))
     actual = money(PricingPolicy().price(usage_obj)) if result.status == 'SUCCESS' else Decimal('0.000000')
     success = result.status == 'SUCCESS' and actual <= reservation_amount
@@ -1368,10 +1382,10 @@ def execute_capture_locally(envelope_id: str, payload: LocalExecuteRequest) -> d
         final_status = 'COMPLETED' if success else 'FAILED'
         db.execute('UPDATE missions SET status = ? WHERE id = ?', ('completed' if success else 'failed', envelope['mission_id']))
         db.execute('UPDATE execution_envelopes SET status = ? WHERE envelope_id = ?', (final_status, envelope_id))
-        db.execute('INSERT INTO local_executions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', (payload.execution_id, envelope_id, envelope['mission_id'], reservation_id, 'SETTLED' if success else 'REFUNDED', result.output, result.stderr, json.dumps(usage_obj.as_dict(), sort_keys=True), money_str(actual), now()))
+        db.execute('INSERT INTO local_executions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', (payload.execution_id, envelope_id, envelope['mission_id'], reservation_id, 'SETTLED' if success else 'REFUNDED', result.output, result.stderr, json.dumps({'model_id': result.model_id, 'runtime': result.runtime, **usage_obj.as_dict()}, sort_keys=True), money_str(actual), now()))
         db.commit()
         final_wallet = row_dict(db.execute('SELECT * FROM wallets WHERE id = ?', (wallet['id'],)).fetchone()) or {}
-        return {'execution_id': payload.execution_id, 'envelope_id': envelope_id, 'status': final_status, 'output': result.output, 'stderr': result.stderr, 'usage': usage_obj.as_dict(), 'amount': money_str(actual), 'wallet': final_wallet, 'execution_authorized': True, 'escrow_reserved': False, 'note': 'Local process execution completed. This adapter is process-boundary only, not a security sandbox.'}
+        return {'execution_id': payload.execution_id, 'envelope_id': envelope_id, 'model_id': result.model_id, 'runtime': result.runtime, 'status': final_status, 'output': result.output, 'stderr': result.stderr, 'usage': usage_obj.as_dict(), 'amount': money_str(actual), 'wallet': final_wallet, 'execution_authorized': True, 'escrow_reserved': False, 'note': 'Local model execution completed. Runtime isolation depends on the selected adapter; the command adapter is process-boundary only.'}
 
 
 @app.get('/memory/health')
