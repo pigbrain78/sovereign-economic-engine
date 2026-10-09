@@ -97,6 +97,10 @@ class OllamaModelAdapter:
 
 def configured_local_models() -> list[LocalModelAdapter]:
     adapters: list[LocalModelAdapter] = []
+    from app.sandbox_model import configured_sandbox_model
+    sandbox = configured_sandbox_model()
+    if sandbox:
+        adapters.append(sandbox)
     command = CommandModelAdapter()
     if command.executor.command:
         adapters.append(command)
@@ -108,7 +112,8 @@ def configured_local_models() -> list[LocalModelAdapter]:
 
 def local_model_status() -> dict[str, Any]:
     adapters = configured_local_models()
-    return {'runtime': 'local', 'cloud_calls': False, 'models': [adapter.status() for adapter in adapters], 'configured': bool(adapters), 'note': 'Only explicitly configured local runtimes are listed; no fallback to a cloud provider.'}
+    statuses = [adapter.status() for adapter in adapters]
+    return {'runtime': 'local', 'cloud_calls': False, 'models': statuses, 'configured': any(item.get('configured') for item in statuses), 'note': 'Only explicitly configured local runtimes are listed; no fallback to a cloud provider.'}
 
 
 def select_local_model(model_id: str | None = None) -> LocalModelAdapter:
@@ -116,8 +121,11 @@ def select_local_model(model_id: str | None = None) -> LocalModelAdapter:
     if model_id:
         for adapter in adapters:
             if adapter.model_id == model_id:
+                if not adapter.status().get('configured'):
+                    raise LocalModelUnavailable(f'local model {model_id!r} is unavailable')
                 return adapter
         raise LocalModelUnavailable(f'local model {model_id!r} is not configured')
-    if adapters:
-        return adapters[0]
+    for adapter in adapters:
+        if adapter.status().get('configured'):
+            return adapter
     raise LocalModelUnavailable('no local model configured; set LOCAL_EXECUTOR_COMMAND_JSON or LOCAL_OLLAMA_MODEL')

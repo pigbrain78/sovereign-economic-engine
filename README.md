@@ -113,6 +113,10 @@ This adapter is a **process boundary only**, not a security sandbox. It does not
 
 Inspect available local models with `GET /local-models`. Pass a specific `model_id` to the local execution request when more than one adapter is configured. If no local adapter is available, selection fails closed; the system never silently falls back to Hugging Face or another cloud provider.
 
+### Rootless container sandbox
+
+`app/sandbox_model.py` adds a separate `rootless_container` adapter. It builds a Podman command with a non-root UID, read-only root filesystem, `no-new-privileges`, all capabilities dropped, disabled network, bounded memory/PIDs, and a bounded temporary filesystem. It requires explicit `LOCAL_SANDBOX_IMAGE` and `LOCAL_SANDBOX_COMMAND_JSON` configuration. Podman is installed in the validation sandbox, but its subordinate UID/GID mapping prevents unpacking a normal image here; therefore a real container run is **not available in this environment**, and selection fails closed rather than silently using the unsandboxed command adapter.
+
 ## Dollar-wallet API sequence
 
 1. `POST /wallets`
