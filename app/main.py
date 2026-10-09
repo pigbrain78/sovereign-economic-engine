@@ -15,7 +15,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from app.substrate import PricingPolicy, ResourceUsage
-from app.memory import MemoryAPI
+from app.pocket_memory_adapter import PocketMemoryAdapter as MemoryAPI
 from app.micro_billing import MetricType, SplitRevenueContract, SplitRule, SynapseMicroBillingEngine, TelemetryEvent
 from app.huggingface_layer import HuggingFaceProviderUnavailable, ModelPolicyViolation, HuggingFaceChatAdapter, catalog as hf_catalog, quote_model as hf_quote_model, select_model as hf_select_model
 from app.upgrade_treasury import RDPFitnessMetric, ReserveRates, ScenarioPath, ScenarioSimulator, UpgradeStatus, canonical_approval_payload, verify_ed25519_signature
@@ -1457,6 +1457,16 @@ def execute_capture_locally(envelope_id: str, payload: LocalExecuteRequest) -> d
 @app.get('/memory/health')
 def memory_health() -> dict[str, Any]:
     return MEMORY.health()
+
+
+@app.post('/memory/context')
+def memory_context(payload: MemorySearchRequest) -> dict[str, Any]:
+    return MEMORY.context(payload.query, payload.top_k)
+
+
+@app.get('/memory/contradictions')
+def memory_contradictions() -> list[dict[str, Any]]:
+    return MEMORY.contradictions()
 
 
 @app.get('/memory/{memory_id}')

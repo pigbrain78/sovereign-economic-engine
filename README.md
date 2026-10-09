@@ -128,6 +128,10 @@ The security primitives adapted from `software-defined-reflex-agent` now live un
 
 AgentRuns expose their `input_hash`, `output_hash`, `provenance_hash`, signing algorithm, and optional signature through `GET /agent-runs/{execution_id}`. Hash-only mode remains the default development behavior; missing or malformed Ed25519 material fails closed rather than producing an unverified signature.
 
+### Merged Pocket OS memory brain
+
+The Pocket OS Python `memory_brain` package is now included under `app/pocket_memory/` and is authoritative behind `app/pocket_memory_adapter.py`. The existing `/memory/*` API remains compatible, while writes now use Pocket OS's ledger-first commit path with exact deduplication, immutable history, provenance, review-gated irreversible operations, and contradiction tracking. New projections are available at `POST /memory/context` for grounded context packages and `GET /memory/contradictions` for unresolved contradictions. Memory informs agents; it does not authorize execution.
+
 ## Dollar-wallet API sequence
 
 1. `POST /wallets`
