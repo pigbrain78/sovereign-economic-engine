@@ -117,6 +117,17 @@ Inspect available local models with `GET /local-models`. Pass a specific `model_
 
 `app/sandbox_model.py` adds a separate `rootless_container` adapter. It builds a Podman command with a non-root UID, read-only root filesystem, `no-new-privileges`, all capabilities dropped, disabled network, bounded memory/PIDs, and a bounded temporary filesystem. It requires explicit `LOCAL_SANDBOX_IMAGE` and `LOCAL_SANDBOX_COMMAND_JSON` configuration. Podman is installed in the validation sandbox, but its subordinate UID/GID mapping prevents unpacking a normal image here; therefore a real container run is **not available in this environment**, and selection fails closed rather than silently using the unsandboxed command adapter.
 
+### Merged cryptographic provenance
+
+The security primitives adapted from `software-defined-reflex-agent` now live under `app/crypto_provenance/`:
+
+- strict canonical JSON rejects non-finite numbers and unsupported values;
+- domain-separated SHA-256 digests bind AgentRun provenance to the Sovereign namespace;
+- optional Ed25519 signatures are enabled only when `SOVEREIGN_SIGNING_MODE=ed25519` and valid Base64 keys are supplied;
+- the imported SQLite ledger implementation remains available as a reusable append-only ledger primitive.
+
+AgentRuns expose their `input_hash`, `output_hash`, `provenance_hash`, signing algorithm, and optional signature through `GET /agent-runs/{execution_id}`. Hash-only mode remains the default development behavior; missing or malformed Ed25519 material fails closed rather than producing an unverified signature.
+
 ## Dollar-wallet API sequence
 
 1. `POST /wallets`

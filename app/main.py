@@ -22,6 +22,7 @@ from app.upgrade_treasury import RDPFitnessMetric, ReserveRates, ScenarioPath, S
 from app.sandbox_promotion import SandboxPromotion, SandboxRejected
 from app.local_executor import LocalCommandExecutor, LocalExecutorUnavailable
 from app.local_model import LocalModelUnavailable, local_model_status, select_local_model
+from app.crypto_provenance.provenance import agent_run_digest, sign_agent_run, signing_algorithm
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = Path(__import__('os').environ.get('SOVEREIGN_DB', BASE_DIR / 'sovereign.db'))
@@ -179,6 +180,28 @@ def init_db() -> None:
             amount TEXT NOT NULL,
             created_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS agent_runs (
+            run_id TEXT PRIMARY KEY,
+            execution_id TEXT NOT NULL UNIQUE,
+            envelope_id TEXT NOT NULL REFERENCES execution_envelopes(envelope_id),
+            mission_id TEXT NOT NULL REFERENCES missions(id),
+            wallet_id TEXT NOT NULL REFERENCES wallets(id),
+            reservation_id TEXT,
+            model_id TEXT NOT NULL,
+            runtime TEXT NOT NULL,
+            authorization_status TEXT NOT NULL,
+            status TEXT NOT NULL,
+            input_hash TEXT NOT NULL,
+            output_hash TEXT,
+            usage TEXT NOT NULL DEFAULT '{}',
+            amount TEXT NOT NULL DEFAULT '0.000000',
+            error TEXT,
+            provenance_hash TEXT NOT NULL,
+            signature_algorithm TEXT NOT NULL DEFAULT 'hash-only',
+            signature TEXT,
+            created_at TEXT NOT NULL,
+            completed_at TEXT
+        );
         CREATE TABLE IF NOT EXISTS pocket_projects (
             project_id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
@@ -293,6 +316,13 @@ def init_db() -> None:
         }.items():
             if column not in wallet_columns:
                 db.execute(f'ALTER TABLE wallets ADD COLUMN {column} {definition}')
+        agent_run_columns = {row['name'] for row in db.execute('PRAGMA table_info(agent_runs)').fetchall()}
+        for column, definition in {
+            'signature_algorithm': "TEXT NOT NULL DEFAULT 'hash-only'",
+            'signature': 'TEXT',
+        }.items():
+            if column not in agent_run_columns:
+                db.execute(f'ALTER TABLE agent_runs ADD COLUMN {column} {definition}')
         db.commit()
 
 
@@ -519,6 +549,10 @@ def row_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
 
 def ledger(db: sqlite3.Connection, wallet_id: str, event: str, amount: Decimal, *, mission_id: str | None = None, reservation_id: str | None = None, metadata: dict[str, Any] | None = None) -> None:
     db.execute('INSERT INTO ledger VALUES (?, ?, ?, ?, ?, ?, ?, ?)', (str(uuid.uuid4()), wallet_id, mission_id, reservation_id, event, money_str(amount), json.dumps(metadata or {}, sort_keys=True), now()))
+
+
+def agent_run_hash(payload: dict[str, Any]) -> str:
+    return agent_run_digest(payload)
 
 
 def pocket_event(db: sqlite3.Connection, event_type: str, entity_id: str, payload: dict[str, Any]) -> None:
@@ -1324,16 +1358,24 @@ def local_models() -> dict[str, Any]:
     return local_model_status()
 
 
+@app.get('/agent-runs/{execution_id}')
+def get_agent_run(execution_id: str) -> dict[str, Any]:
+    with closing(connect()) as db:
+        run = db.execute('SELECT * FROM agent_runs WHERE execution_id = ?', (execution_id,)).fetchone()
+        if not run:
+            raise HTTPException(404, 'agent run not found')
+        result = row_dict(run) or {}
+        result['usage'] = json.loads(result.get('usage') or '{}')
+        return result
+
+
 @app.post('/capture/{envelope_id}/execute-local')
 def execute_capture_locally(envelope_id: str, payload: LocalExecuteRequest) -> dict[str, Any]:
-    try:
-        adapter = select_local_model(payload.model_id)
-    except (LocalExecutorUnavailable, LocalModelUnavailable) as exc:
-        raise HTTPException(503, str(exc)) from exc
     with closing(connect()) as db:
         prior = db.execute('SELECT * FROM local_executions WHERE execution_id = ?', (payload.execution_id,)).fetchone()
         if prior:
-            return {'execution_id': payload.execution_id, 'envelope_id': prior['envelope_id'], 'status': prior['status'], 'output': prior['output'], 'stderr': prior['stderr'], 'usage': json.loads(prior['usage']), 'amount': prior['amount'], 'idempotent_replay': True, 'execution_authorized': True}
+            run = db.execute('SELECT * FROM agent_runs WHERE execution_id = ?', (payload.execution_id,)).fetchone()
+            return {'execution_id': payload.execution_id, 'envelope_id': prior['envelope_id'], 'status': prior['status'], 'output': prior['output'], 'stderr': prior['stderr'], 'usage': json.loads(prior['usage']), 'amount': prior['amount'], 'idempotent_replay': True, 'execution_authorized': True, 'agent_run': row_dict(run) or {}}
         envelope = db.execute('SELECT * FROM execution_envelopes WHERE envelope_id = ?', (envelope_id,)).fetchone()
         if not envelope:
             raise HTTPException(404, 'capture envelope not found')
@@ -1352,9 +1394,20 @@ def execute_capture_locally(envelope_id: str, payload: LocalExecuteRequest) -> d
         db.execute('INSERT INTO reservations VALUES (?, ?, ?, ?, ?, ?, ?)', (reservation_id, wallet['id'], mission['id'], money_str(reservation_amount), 'reserved', now(), None))
         db.execute('UPDATE wallets SET available = ?, reserved = ? WHERE id = ?', (money_str(available - reservation_amount), money_str(money(wallet['reserved']) + reservation_amount), wallet['id']))
         ledger(db, wallet['id'], 'reserve', reservation_amount, mission_id=mission['id'], reservation_id=reservation_id, metadata={'execution_id': payload.execution_id, 'runtime': 'local'})
-        db.commit()
         memory = MEMORY.get(envelope['memory_id'])
         prompt = memory['content'] if memory else ''
+        try:
+            adapter = select_local_model(payload.model_id)
+        except (LocalExecutorUnavailable, LocalModelUnavailable) as exc:
+            raise HTTPException(503, str(exc)) from exc
+        run_id = f'run_{uuid.uuid4().hex[:16]}'
+        created_at = now()
+        input_hash = hashlib.sha256(prompt.encode('utf-8')).hexdigest()
+        run_payload = {'run_id': run_id, 'execution_id': payload.execution_id, 'envelope_id': envelope_id, 'mission_id': mission['id'], 'wallet_id': wallet['id'], 'reservation_id': reservation_id, 'model_id': adapter.model_id, 'runtime': adapter.runtime, 'authorization_status': 'AUTHORIZED', 'status': 'RESERVED', 'input_hash': input_hash, 'created_at': created_at}
+        provenance_hash = agent_run_hash(run_payload)
+        signature = sign_agent_run(run_payload)
+        db.execute('INSERT INTO agent_runs (run_id,execution_id,envelope_id,mission_id,wallet_id,reservation_id,model_id,runtime,authorization_status,status,input_hash,provenance_hash,signature_algorithm,signature,created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', (run_id, payload.execution_id, envelope_id, mission['id'], wallet['id'], reservation_id, adapter.model_id, adapter.runtime, 'AUTHORIZED', 'RESERVED', input_hash, provenance_hash, signing_algorithm(), signature, created_at))
+        db.commit()
     try:
         result = adapter.execute(prompt, payload.timeout_seconds)
     except LocalModelUnavailable as exc:
@@ -1363,13 +1416,18 @@ def execute_capture_locally(envelope_id: str, payload: LocalExecuteRequest) -> d
             db.execute('UPDATE reservations SET status = ?, settled_at = ? WHERE id = ?', ('refunded', now(), reservation_id))
             db.execute('UPDATE wallets SET available = ?, reserved = ? WHERE id = ?', (money_str(money(wallet['available']) + reservation_amount), money_str(money(wallet['reserved']) - reservation_amount), wallet['id']))
             ledger(db, wallet['id'], 'release', reservation_amount, mission_id=envelope['mission_id'], reservation_id=reservation_id, metadata={'execution_id': payload.execution_id, 'runtime': 'local', 'reason': str(exc)})
+            completed_at = now()
+            run = db.execute('SELECT * FROM agent_runs WHERE execution_id = ?', (payload.execution_id,)).fetchone()
+            error_payload = {'run_id': run['run_id'], 'execution_id': payload.execution_id, 'status': 'FAILED_REFUNDED', 'model_id': run['model_id'], 'runtime': run['runtime'], 'input_hash': run['input_hash'], 'error': str(exc), 'amount': '0.000000', 'completed_at': completed_at}
+            error_hash = agent_run_hash(error_payload)
+            db.execute('UPDATE agent_runs SET status = ?, error = ?, amount = ?, completed_at = ?, provenance_hash = ?, signature_algorithm = ?, signature = ? WHERE execution_id = ?', ('FAILED_REFUNDED', str(exc), '0.000000', completed_at, error_hash, signing_algorithm(), sign_agent_run(error_payload), payload.execution_id))
             db.commit()
         raise HTTPException(502, str(exc)) from exc
     usage_obj = ResourceUsage(Decimal(str(result.duration_seconds)), 0, result.input_bytes, result.output_bytes, result.token_count, Decimal(str(result.duration_seconds)))
     actual = money(PricingPolicy().price(usage_obj)) if result.status == 'SUCCESS' else Decimal('0.000000')
     success = result.status == 'SUCCESS' and actual <= reservation_amount
     if result.status == 'SUCCESS' and actual > reservation_amount:
-        result = result.__class__(result.status, result.output, 'measured cost exceeded the execution envelope', result.duration_seconds, result.input_bytes, result.output_bytes, result.token_count)
+        result = result.__class__(result.model_id, result.runtime, 'FAILED', result.output, 'measured cost exceeded the execution envelope', result.duration_seconds, result.input_bytes, result.output_bytes, result.token_count)
     with closing(connect()) as db:
         wallet = require_wallet(db, envelope['wallet_id'])
         unused = reservation_amount - actual
@@ -1383,9 +1441,17 @@ def execute_capture_locally(envelope_id: str, payload: LocalExecuteRequest) -> d
         db.execute('UPDATE missions SET status = ? WHERE id = ?', ('completed' if success else 'failed', envelope['mission_id']))
         db.execute('UPDATE execution_envelopes SET status = ? WHERE envelope_id = ?', (final_status, envelope_id))
         db.execute('INSERT INTO local_executions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', (payload.execution_id, envelope_id, envelope['mission_id'], reservation_id, 'SETTLED' if success else 'REFUNDED', result.output, result.stderr, json.dumps({'model_id': result.model_id, 'runtime': result.runtime, **usage_obj.as_dict()}, sort_keys=True), money_str(actual), now()))
+        completed_at = now()
+        output_hash = hashlib.sha256(result.output.encode('utf-8')).hexdigest()
+        run_status = 'COMPLETED' if success else 'FAILED_REFUNDED'
+        run = db.execute('SELECT * FROM agent_runs WHERE execution_id = ?', (payload.execution_id,)).fetchone()
+        final_payload = {'run_id': run['run_id'], 'execution_id': payload.execution_id, 'status': run_status, 'model_id': result.model_id, 'runtime': result.runtime, 'input_hash': run['input_hash'], 'output_hash': output_hash, 'usage': usage_obj.as_dict(), 'amount': money_str(actual), 'completed_at': completed_at, 'error': result.stderr or None}
+        final_provenance = agent_run_hash(final_payload)
+        db.execute('UPDATE agent_runs SET status = ?, output_hash = ?, usage = ?, amount = ?, error = ?, completed_at = ?, provenance_hash = ?, signature_algorithm = ?, signature = ? WHERE execution_id = ?', (run_status, output_hash, json.dumps({'model_id': result.model_id, 'runtime': result.runtime, **usage_obj.as_dict()}, sort_keys=True), money_str(actual), result.stderr or None, completed_at, final_provenance, signing_algorithm(), sign_agent_run(final_payload), payload.execution_id))
         db.commit()
         final_wallet = row_dict(db.execute('SELECT * FROM wallets WHERE id = ?', (wallet['id'],)).fetchone()) or {}
-        return {'execution_id': payload.execution_id, 'envelope_id': envelope_id, 'model_id': result.model_id, 'runtime': result.runtime, 'status': final_status, 'output': result.output, 'stderr': result.stderr, 'usage': usage_obj.as_dict(), 'amount': money_str(actual), 'wallet': final_wallet, 'execution_authorized': True, 'escrow_reserved': False, 'note': 'Local model execution completed. Runtime isolation depends on the selected adapter; the command adapter is process-boundary only.'}
+        agent_run = row_dict(db.execute('SELECT * FROM agent_runs WHERE execution_id = ?', (payload.execution_id,)).fetchone()) or {}
+        return {'execution_id': payload.execution_id, 'envelope_id': envelope_id, 'model_id': result.model_id, 'runtime': result.runtime, 'status': final_status, 'output': result.output, 'stderr': result.stderr, 'usage': usage_obj.as_dict(), 'amount': money_str(actual), 'wallet': final_wallet, 'agent_run': agent_run, 'execution_authorized': True, 'escrow_reserved': False, 'note': 'Local model execution completed. Runtime isolation depends on the selected adapter; the command adapter is process-boundary only.'}
 
 
 @app.get('/memory/health')
