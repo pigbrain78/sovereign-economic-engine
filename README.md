@@ -296,6 +296,10 @@ This is a safe reference promotion layer, not a container or VM boundary. It doe
 
 Memory is informational only. It does not authorize execution.
 
+## Skill Forge capability registry
+
+The Skill Forge integration adapts the source project's skill genome, permission, lineage, validation, and execution-evidence contracts into the canonical backend. Use `POST /forge/skills` to register a genome, `GET /forge/skills` to discover candidates, `POST /forge/skills/{skill_id}/validate` to persist an evidence report, and `POST /forge/skills/{skill_id}/proposals` to bridge an approved capability into the ordinary Pocket OS proposal queue. A skill stays `draft`, `testing`, or `rejected` unless the report passes, contains no security issues, meets the score threshold, and explicitly supplies SAIL approval. Even `approved` skills have `execution_authorized: false`; human ratification, wallet policy, sandbox execution, and settlement remain separate gates.
+
 ## First hero workflow: thought capture
 
 `POST /capture` turns a text thought into a durable memory record, a planned mission, and a bounded execution envelope. The request requires a wallet, privacy mode (`local_only`, `user_server`, or `approved_external`), task type, maximum cost, capabilities, and minimum quality. The response includes a deterministic quote hash and idempotency key.

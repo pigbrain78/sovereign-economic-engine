@@ -23,6 +23,7 @@ from app.sandbox_promotion import SandboxPromotion, SandboxRejected
 from app.local_executor import LocalCommandExecutor, LocalExecutorUnavailable
 from app.local_model import LocalModelUnavailable, local_model_status, select_local_model
 from app.crypto_provenance.provenance import agent_run_digest, sign_agent_run, signing_algorithm
+from app.skill_forge import evaluate_validation, normalize_permissions, skill_hash, validate_genome
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = Path(__import__('os').environ.get('SOVEREIGN_DB', BASE_DIR / 'sovereign.db'))
@@ -301,6 +302,35 @@ def init_db() -> None:
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS forge_skills (
+            skill_id TEXT PRIMARY KEY,
+            genome TEXT NOT NULL,
+            files TEXT NOT NULL,
+            status TEXT NOT NULL,
+            skill_hash TEXT NOT NULL,
+            lineage TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS forge_validations (
+            validation_id TEXT PRIMARY KEY,
+            skill_id TEXT NOT NULL REFERENCES forge_skills(skill_id),
+            report TEXT NOT NULL,
+            decision TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS forge_execution_logs (
+            execution_log_id TEXT PRIMARY KEY,
+            skill_id TEXT NOT NULL REFERENCES forge_skills(skill_id),
+            version TEXT NOT NULL,
+            agent_consumer TEXT NOT NULL,
+            input_hash TEXT NOT NULL,
+            output_summary TEXT NOT NULL,
+            success INTEGER NOT NULL,
+            latency_ms INTEGER NOT NULL,
+            evidence TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
         ''')
         mission_columns = {row['name'] for row in db.execute('PRAGMA table_info(missions)').fetchall()}
         if 'task_type' not in mission_columns:
@@ -524,6 +554,29 @@ class ProposalCreate(BaseModel):
 class ProposalApproval(BaseModel):
     decision: str = Field(pattern=r'^(approve|reject|request_more_testing)$')
     actor: str = Field(min_length=1)
+class SkillRegistration(BaseModel):
+    genome: dict[str, Any]
+    files: list[dict[str, Any]] = Field(default_factory=list)
+    lineage: dict[str, Any] = Field(default_factory=lambda: {'child_skill_ids': [], 'consumers': []})
+class SkillValidationRequest(BaseModel):
+    report: dict[str, Any]
+class SkillProposalRequest(BaseModel):
+    project_id: str
+    loop_id: str | None = None
+    shadow_id: str | None = None
+    agent_id: str = Field(min_length=1)
+    proposed_cost: str = Field(pattern=r'^\d+(\.\d{1,6})?$')
+    recurring: bool = False
+    expected_benefit: dict[str, Any]
+    evidence: list[dict[str, Any]] = Field(default_factory=list)
+class SkillExecutionLogRequest(BaseModel):
+    version: str = Field(min_length=1)
+    agent_consumer: str = Field(min_length=1)
+    input_hash: str = Field(min_length=1)
+    output_summary: str = Field(min_length=1)
+    success: bool
+    latency_ms: int = Field(ge=0)
+    evidence: dict[str, Any] = Field(default_factory=dict)
 
 
 class HuggingFaceQuoteRequest(BaseModel):
@@ -652,6 +705,103 @@ def health() -> dict[str, Any]:
             'external_model_executor': 'huggingface_ready' if hf_ready else 'huggingface_config_required',
         },
     }
+
+
+def require_forge_skill(db: sqlite3.Connection, skill_id: str) -> sqlite3.Row:
+    skill = db.execute('SELECT * FROM forge_skills WHERE skill_id = ?', (skill_id,)).fetchone()
+    if not skill:
+        raise HTTPException(404, 'Skill Forge skill not found')
+    return skill
+
+
+def forge_skill_response(row: sqlite3.Row) -> dict[str, Any]:
+    result = row_dict(row) or {}
+    for field in ('genome', 'files', 'lineage'):
+        result[field] = json.loads(result[field])
+    return result
+
+
+@app.post('/forge/skills', status_code=201)
+def register_forge_skill(payload: SkillRegistration) -> dict[str, Any]:
+    errors = validate_genome(payload.genome)
+    if errors:
+        raise HTTPException(422, {'reason': 'INVALID_SKILL_GENOME', 'errors': errors})
+    skill_id = str(payload.genome['skill_id'])
+    normalized_genome = {**payload.genome, 'permissions': normalize_permissions(payload.genome['permissions'])}
+    digest = skill_hash(normalized_genome)
+    timestamp = now()
+    with closing(connect()) as db:
+        try:
+            db.execute('INSERT INTO forge_skills (skill_id,genome,files,status,skill_hash,lineage,created_at,updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', (skill_id, json.dumps(normalized_genome, sort_keys=True), json.dumps(payload.files, sort_keys=True), 'draft', digest, json.dumps(payload.lineage, sort_keys=True), timestamp, timestamp))
+            db.commit()
+        except sqlite3.IntegrityError as exc:
+            raise HTTPException(409, 'skill id already exists') from exc
+        return forge_skill_response(db.execute('SELECT * FROM forge_skills WHERE skill_id = ?', (skill_id,)).fetchone())
+
+
+@app.get('/forge/skills')
+def list_forge_skills(status: str | None = None, domain: str | None = None, query: str | None = None) -> list[dict[str, Any]]:
+    with closing(connect()) as db:
+        clauses, params = [], []
+        if status:
+            clauses.append('status = ?'); params.append(status)
+        if domain:
+            clauses.append("json_extract(genome, '$.domain') = ?"); params.append(domain)
+        if query:
+            clauses.append("(lower(json_extract(genome, '$.name')) LIKE ? OR lower(json_extract(genome, '$.purpose')) LIKE ?)")
+            needle = f'%{query.lower()}%'; params.extend([needle, needle])
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ''
+        return [forge_skill_response(row) for row in db.execute(f'SELECT * FROM forge_skills{where} ORDER BY updated_at DESC', params).fetchall()]
+
+
+@app.get('/forge/skills/{skill_id}')
+def get_forge_skill(skill_id: str) -> dict[str, Any]:
+    with closing(connect()) as db:
+        return forge_skill_response(require_forge_skill(db, skill_id))
+
+
+@app.post('/forge/skills/{skill_id}/validate')
+def validate_forge_skill(skill_id: str, payload: SkillValidationRequest) -> dict[str, Any]:
+    with closing(connect()) as db:
+        skill = require_forge_skill(db, skill_id)
+        decision = evaluate_validation(json.loads(skill['genome']), payload.report)
+        validation_id = f'forge_validation_{uuid.uuid4().hex[:12]}'
+        db.execute('INSERT INTO forge_validations (validation_id,skill_id,report,decision,created_at) VALUES (?, ?, ?, ?, ?)', (validation_id, skill_id, json.dumps(payload.report, sort_keys=True), json.dumps(decision.as_dict(), sort_keys=True), now()))
+        db.execute('UPDATE forge_skills SET status = ?, updated_at = ? WHERE skill_id = ?', (decision.status, now(), skill_id))
+        db.commit()
+        return {'validation_id': validation_id, 'skill_id': skill_id, 'decision': decision.as_dict(), 'execution_authorized': False, 'note': 'Validation evidence changes catalog status only; it does not authorize execution or purchase.'}
+
+
+@app.get('/forge/skills/{skill_id}/validations')
+def list_forge_validations(skill_id: str) -> list[dict[str, Any]]:
+    with closing(connect()) as db:
+        require_forge_skill(db, skill_id)
+        return [{**(row_dict(row) or {}), 'report': json.loads(row['report']), 'decision': json.loads(row['decision'])} for row in db.execute('SELECT * FROM forge_validations WHERE skill_id = ? ORDER BY created_at DESC', (skill_id,)).fetchall()]
+
+
+@app.post('/forge/skills/{skill_id}/execution-logs', status_code=201)
+def record_forge_execution(skill_id: str, payload: SkillExecutionLogRequest) -> dict[str, Any]:
+    with closing(connect()) as db:
+        require_forge_skill(db, skill_id)
+        execution_log_id = f'forge_execution_{uuid.uuid4().hex[:12]}'
+        db.execute('INSERT INTO forge_execution_logs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', (execution_log_id, skill_id, payload.version, payload.agent_consumer, payload.input_hash, payload.output_summary, int(payload.success), payload.latency_ms, json.dumps(payload.evidence, sort_keys=True), now()))
+        db.commit()
+        return {'execution_log_id': execution_log_id, 'skill_id': skill_id, 'recorded': True, 'execution_authorized': False}
+
+
+@app.post('/forge/skills/{skill_id}/proposals', status_code=201)
+def propose_forge_skill(skill_id: str, payload: SkillProposalRequest) -> dict[str, Any]:
+    with closing(connect()) as db:
+        skill = require_forge_skill(db, skill_id)
+        if skill['status'] != 'approved':
+            raise HTTPException(409, 'skill requires an approved validation report before proposal')
+        genome = json.loads(skill['genome'])
+        candidate = {'skill_id': skill_id, 'version': genome['version'], 'hash': skill['skill_hash'], 'name': genome['name'], 'permissions': genome['permissions']}
+    proposal = ProposalCreate(project_id=payload.project_id, loop_id=payload.loop_id, shadow_id=payload.shadow_id, agent_id=payload.agent_id, title=f"Evaluate Skill Forge capability: {genome['name']}", category='skill_forge', candidate=candidate, proposed_cost=payload.proposed_cost, recurring=payload.recurring, access_level='write' if genome['permissions'].get('write') else 'read_only', expected_benefit=payload.expected_benefit, evidence=payload.evidence, recommendation='HOLD_FOR_APPROVAL')
+    result = create_pocket_proposal(proposal)
+    result['execution_authorized'] = False
+    result['note'] = 'Skill Forge proposal created from approved validation evidence; human ratification remains required and no purchase or execution occurred.'
+    return result
 
 
 @app.post('/pocket/projects', status_code=201)
