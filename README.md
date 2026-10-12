@@ -281,9 +281,13 @@ PENDING_EVALUATION → PENDING_HUMAN_GATE → FUNDS_RESERVED → SETTLED
 
 The promotion layer accepts a candidate file bundle only after funds are reserved. It rejects absolute paths, traversal segments, unsupported file types, oversized files, duplicate candidate IDs, invalid Python syntax, and invalid JSON. Accepted candidates are staged below `SOVEREIGN_SANDBOX_ROOT` and receive a deterministic verification receipt containing the candidate hash, file count, byte count, and checks performed.
 
-Activation requires an explicit canary result. A passed canary atomically replaces the active candidate pointer with `os.replace`; a failed canary leaves the candidate inactive. Rollback verifies the active candidate hash, restores the previous pointer when available, and refunds the reserved development amount. Promotion and rollback events are appended to the upgrade hash chain.
+Activation requires structured measured evidence (`runtime`, exit code, duration, output hash, resource usage, and pass state). The evidence is bound to both the candidate hash and verification-receipt hash before a passed canary atomically replaces the active candidate pointer with `os.replace`; a failed or incomplete canary leaves the candidate inactive. Receipt and policy hashes detect tampering, and every promotion response exposes `execution_authorized: false`. Rollback verifies the active candidate hash, restores the previous pointer when available, and refunds the reserved development amount. Promotion and rollback events are appended to the upgrade hash chain.
 
 This is a safe reference promotion layer, not a container or VM boundary. It does not execute candidate code, install dependencies, or claim process isolation. Production deployment still requires a separate OS/container sandbox, signed artifact registry, crash-safe fencing, and an application-specific health/canary executor.
+
+## External tool discovery
+
+`POST /tools/discover` accepts a provider-supplied manifest but never fetches an arbitrary URL. The source must be HTTPS, must not contain credentials or fragments, and private/loopback/local addresses are rejected. The manifest has a deterministic content digest; when `TOOL_DISCOVERY_PUBLIC_KEY_B64` is configured, an Ed25519 attestation over the canonical manifest is required for `VERIFIED` status. Without that configured trust root, discovery remains `UNVERIFIED` and cannot become a proposal candidate. `GET /tools` and `GET /tools/{tool_id}` expose the catalog with `eligible_for_proposal` and `execution_authorized: false`. Discovery is catalog evidence only: it does not download, install, purchase, reserve, or execute a tool.
 
 ## Memory API
 
@@ -338,11 +342,11 @@ python3 -m compileall -q app tests
 pytest -q
 ```
 
-Current verified result: **48 passed**.
+Current verified result: **72 passed**.
 
 ## Production boundary
 
-This is a functioning integrated MVP, not a sealed production platform. Remaining work includes promotion sandbox integration for candidate code, multi-process locking/fencing for upgrade settlement, live provider pricing synchronization, trusted provider execution, direct resource measurement, durable micro-billing persistence, authentication and tenant isolation, strict RFC 8785/JCS integration, and a real Pocket OS council/capability backend beyond the current explicit human-decision record.
+This is a functioning integrated MVP, not a sealed production platform. Remaining work includes a real OS/container sandbox for candidate execution, multi-process locking/fencing for upgrade settlement, live provider pricing synchronization, trusted provider execution, durable micro-billing persistence, authentication and tenant isolation, strict RFC 8785/JCS integration, signed production artifact trust roots, and a real Pocket OS council/capability backend beyond the current explicit human-decision record.
 
 Core rule:
 

@@ -28,8 +28,9 @@ Establish the smallest executable system that makes the economic boundary real: 
 - Pocket OS control plane: project context, open loops, advisory Shadow observations, evidence-backed improvement proposals, human decision states, and a verified control-plane event chain.
 - Hugging Face model layer: interchangeable candidate catalog, capability/quality/budget selection, provider policy choices, verified-pricing quote contracts, and fail-closed server-side adapter boundary.
 - Upgrade treasury: reserve-bucket allocation on deposits, RDP fitness/scenario evaluation gates, Ed25519 human approval, hash-chained upgrade events, development-reserve settlement, and rollback refunds.
-- Sandbox promotion: strict candidate bundle validation, deterministic verification receipts, explicit canary activation, atomic active-pointer replacement, and hash-chained rollback/refund records.
+- Sandbox promotion: strict candidate bundle validation, deterministic policy-bound verification receipts, tamper detection, structured measured canary evidence bound to candidate and receipt hashes, explicit canary activation, atomic active-pointer replacement, and hash-chained rollback/refund records.
 - Skill Forge integration: durable capability genomes, permission/risk metadata, deterministic identity hashes, evidence-gated validation reports, execution evidence logs, catalog discovery, and a fail-closed bridge into Pocket OS proposals.
+- External tool discovery: HTTPS/private-address validation, deterministic manifest digests, optional Ed25519 provider attestation, durable catalog status, and explicit non-authorizing discovery responses.
 
 ## Next phases
 
@@ -42,7 +43,7 @@ Establish the smallest executable system that makes the economic boundary real: 
 7. Replace the reference file-bundle promoter with a real OS/container sandbox and signed artifact registry before allowing generated code to run.
 7. Add a thin operator UI after the API contract stabilizes.
 8. Add Pocket OS council evaluation, capability authorization, typed project projections, and live event synchronization; keep Shadow authority at `NONE`.
-9. Replace the Skill Forge demo evidence-gate form with real hardened sandbox measurements, signed artifact-bound receipts, and provider-backed tool discovery.
+9. Replace the Skill Forge demo evidence-gate form with a real OS/container sandbox, production trust-root rotation, and provider-backed tool discovery with authenticated source registries.
 
 The micro-billing API is intentionally marked `ready_in_process_memory` until its durable transaction boundary, agent authorization signatures, and MeshLedger adapter are implemented.
 

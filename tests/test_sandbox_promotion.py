@@ -37,6 +37,20 @@ def test_sandbox_promote_and_rollback_restores_previous(tmp_path):
     assert sandbox.active()['candidate_hash'] == first.candidate_hash
 
 
+def test_sandbox_binds_measured_evidence_and_rejects_receipt_tampering(tmp_path):
+    sandbox = SandboxPromotion(tmp_path / 'sandbox')
+    candidate_path, receipt = sandbox.stage('evidence', {'module.py': 'VALUE = 1\n'})
+    evidence = {'runtime': 'pytest', 'exit_code': 0, 'duration_ms': 12, 'output_hash': 'b' * 64, 'resource_usage': {'cpu_ms': 8}, 'passed': True}
+    bound = sandbox.bind_execution_evidence('evidence', receipt.candidate_hash, evidence)
+    assert bound['candidate_hash'] == receipt.candidate_hash
+    assert bound['execution_authorized'] is False
+    receipt_path = candidate_path / 'verification_receipt.json'
+    raw = receipt_path.read_text(encoding='utf-8').replace('VERIFIED', 'TAMPERED')
+    receipt_path.write_text(raw, encoding='utf-8')
+    with pytest.raises(SandboxRejected):
+        sandbox.promote('evidence', receipt.candidate_hash)
+
+
 def _signed_approval(proposal):
     private = Ed25519PrivateKey.generate()
     public = base64.b64encode(private.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)).decode()
@@ -67,7 +81,7 @@ def test_api_canary_gate_promote_and_rollback(tmp_path, monkeypatch):
     client.post(f"/upgrades/proposals/{proposal2['proposal_id']}/evaluate", json={'mutation_id': 'mut2', 'ast_node_coverage': .9, 'failure_reduction_rate': .2, 'fitness_score': .8, 'verifier_passed': True})
     assert client.post(f"/upgrades/proposals/{proposal2['proposal_id']}/approve", json=_signed_approval(proposal2)).status_code == 200
     staged2 = client.post(f"/upgrades/proposals/{proposal2['proposal_id']}/promote", json={'candidate_id': 'candidate-2', 'files': {'router.py': 'VALUE = 3\n'}}).json()
-    activated = client.post(f"/upgrades/proposals/{proposal2['proposal_id']}/activate", json={'canary_passed': True, 'evidence': {'tests': 'passed'}})
+    activated = client.post(f"/upgrades/proposals/{proposal2['proposal_id']}/activate", json={'canary_passed': True, 'evidence': {'runtime': 'pytest', 'exit_code': 0, 'duration_ms': 42, 'output_hash': 'a' * 64, 'resource_usage': {'cpu_ms': 31, 'memory_bytes': 1024}, 'passed': True, 'tests': {'suite': 'passed'}}})
     assert activated.status_code == 200
     rolled = client.post(f"/upgrades/proposals/{proposal2['proposal_id']}/rollback", json={'reason': 'post-promotion regression'})
     assert rolled.status_code == 200

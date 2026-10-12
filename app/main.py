@@ -13,7 +13,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from app.substrate import PricingPolicy, ResourceUsage
 from app.pocket_memory_adapter import PocketMemoryAdapter as MemoryAPI
 from app.micro_billing import MetricType, SplitRevenueContract, SplitRule, SynapseMicroBillingEngine, TelemetryEvent
@@ -24,6 +24,7 @@ from app.local_executor import LocalCommandExecutor, LocalExecutorUnavailable
 from app.local_model import LocalModelUnavailable, local_model_status, select_local_model
 from app.crypto_provenance.provenance import agent_run_digest, sign_agent_run, signing_algorithm
 from app.skill_forge import evaluate_validation, normalize_permissions, skill_hash, validate_genome
+from app.tool_discovery import evaluate_discovery, manifest_digest
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = Path(__import__('os').environ.get('SOVEREIGN_DB', BASE_DIR / 'sovereign.db'))
@@ -331,6 +332,17 @@ def init_db() -> None:
             evidence TEXT NOT NULL,
             created_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS external_tools (
+            tool_id TEXT PRIMARY KEY,
+            version TEXT NOT NULL,
+            manifest TEXT NOT NULL,
+            status TEXT NOT NULL,
+            manifest_digest TEXT NOT NULL,
+            verification_reason TEXT NOT NULL,
+            attestation_signature TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
         ''')
         mission_columns = {row['name'] for row in db.execute('PRAGMA table_info(missions)').fetchall()}
         if 'task_type' not in mission_columns:
@@ -577,6 +589,17 @@ class SkillExecutionLogRequest(BaseModel):
     success: bool
     latency_ms: int = Field(ge=0)
     evidence: dict[str, Any] = Field(default_factory=dict)
+class ExternalToolDiscoveryRequest(BaseModel):
+    manifest: dict[str, Any]
+    signature_b64: str | None = None
+class CanaryEvidence(BaseModel):
+    runtime: str = Field(min_length=1)
+    exit_code: int
+    duration_ms: float = Field(ge=0)
+    output_hash: str = Field(min_length=1)
+    resource_usage: dict[str, Any]
+    passed: bool
+    tests: dict[str, Any] = Field(default_factory=dict)
 
 
 class HuggingFaceQuoteRequest(BaseModel):
@@ -802,6 +825,53 @@ def propose_forge_skill(skill_id: str, payload: SkillProposalRequest) -> dict[st
     result['execution_authorized'] = False
     result['note'] = 'Skill Forge proposal created from approved validation evidence; human ratification remains required and no purchase or execution occurred.'
     return result
+
+
+def external_tool_response(row: sqlite3.Row) -> dict[str, Any]:
+    result = row_dict(row) or {}
+    result['manifest'] = json.loads(result['manifest'])
+    result['eligible_for_proposal'] = result['status'] == 'VERIFIED'
+    result['execution_authorized'] = False
+    return result
+
+
+@app.post('/tools/discover', status_code=201)
+def discover_external_tool(payload: ExternalToolDiscoveryRequest) -> dict[str, Any]:
+    decision = evaluate_discovery(payload.manifest, payload.signature_b64)
+    tool_id = str(payload.manifest.get('tool_id', ''))
+    if decision['status'] == 'REJECTED':
+        raise HTTPException(422, {'reason': decision['reason'], 'digest': decision['digest'], 'execution_authorized': False})
+    timestamp = now()
+    with closing(connect()) as db:
+        try:
+            db.execute('INSERT INTO external_tools (tool_id,version,manifest,status,manifest_digest,verification_reason,attestation_signature,created_at,updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', (tool_id, str(payload.manifest['version']), json.dumps(payload.manifest, sort_keys=True), decision['status'], decision['digest'] or manifest_digest(payload.manifest), decision['reason'], payload.signature_b64, timestamp, timestamp))
+            db.commit()
+        except sqlite3.IntegrityError as exc:
+            raise HTTPException(409, 'tool id already exists; use a new versioned tool_id') from exc
+        result = external_tool_response(db.execute('SELECT * FROM external_tools WHERE tool_id = ?', (tool_id,)).fetchone())
+        result['note'] = 'Discovery records a provider manifest only. Verification never authorizes execution or purchase.'
+        return result
+
+
+@app.get('/tools')
+def list_external_tools(status: str | None = None, provider: str | None = None) -> list[dict[str, Any]]:
+    with closing(connect()) as db:
+        clauses, params = [], []
+        if status:
+            clauses.append('status = ?'); params.append(status)
+        if provider:
+            clauses.append("json_extract(manifest, '$.provider') = ?"); params.append(provider)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ''
+        return [external_tool_response(row) for row in db.execute(f'SELECT * FROM external_tools{where} ORDER BY updated_at DESC', params).fetchall()]
+
+
+@app.get('/tools/{tool_id}')
+def get_external_tool(tool_id: str) -> dict[str, Any]:
+    with closing(connect()) as db:
+        row = db.execute('SELECT * FROM external_tools WHERE tool_id = ?', (tool_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, 'external tool not found')
+        return external_tool_response(row)
 
 
 @app.post('/pocket/projects', status_code=201)
@@ -1067,18 +1137,24 @@ def activate_upgrade_candidate(proposal_id: str, payload: CanaryActivation) -> d
             db.commit()
             raise HTTPException(422, 'canary verification failed; candidate remains inactive')
         try:
+            try:
+                canary_evidence = CanaryEvidence.model_validate(payload.evidence)
+            except ValidationError as exc:
+                raise HTTPException(422, {'reason': 'CANARY_EVIDENCE_INCOMPLETE', 'errors': exc.errors()}) from exc
+            evidence_receipt = SANDBOX.bind_execution_evidence(promotion['candidate_id'], promotion['candidate_hash'], canary_evidence.model_dump())
             receipt = SANDBOX.promote(promotion['candidate_id'], promotion['candidate_hash'])
         except SandboxRejected as exc:
             upgrade_event(db, proposal_id, 'PROMOTION_HELD', Decimal('0'), {'reason': str(exc)})
             db.commit()
             raise HTTPException(409, str(exc)) from exc
         timestamp = now()
-        db.execute('UPDATE promotion_records SET status = ?, promotion_receipt = ?, updated_at = ? WHERE proposal_id = ?', ('PROMOTED', json.dumps(receipt.as_dict(), sort_keys=True), timestamp, proposal_id))
-        db.execute('UPDATE upgrade_proposals SET status = ?, evidence = ?, updated_at = ? WHERE proposal_id = ?', (UpgradeStatus.SETTLED.value, json.dumps({'promotion': receipt.as_dict(), 'canary': payload.evidence}, sort_keys=True), timestamp, proposal_id))
-        upgrade_event(db, proposal_id, 'CANDIDATE_PROMOTED', money(proposal['reserved_amount']), {'promotion': receipt.as_dict(), 'canary': payload.evidence})
+        db.execute('UPDATE promotion_records SET status = ?, promotion_receipt = ?, updated_at = ? WHERE proposal_id = ?', ('PROMOTED', json.dumps({'promotion': receipt.as_dict(), 'evidence': evidence_receipt}, sort_keys=True), timestamp, proposal_id))
+        db.execute('UPDATE upgrade_proposals SET status = ?, evidence = ?, updated_at = ? WHERE proposal_id = ?', (UpgradeStatus.SETTLED.value, json.dumps({'promotion': receipt.as_dict(), 'canary': evidence_receipt}, sort_keys=True), timestamp, proposal_id))
+        upgrade_event(db, proposal_id, 'CANDIDATE_PROMOTED', money(proposal['reserved_amount']), {'promotion': receipt.as_dict(), 'canary': evidence_receipt})
         db.commit()
         result = row_dict(db.execute('SELECT * FROM promotion_records WHERE proposal_id = ?', (proposal_id,)).fetchone()) or {}
         result['promotion'] = receipt.as_dict()
+        result['evidence'] = evidence_receipt
         return result
 
 
