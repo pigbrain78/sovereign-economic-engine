@@ -11,6 +11,11 @@ import { api, getApiBase, setApiBase, type ForgeSkill, type ForgeValidation, typ
 type Page = 'overview' | 'capture' | 'projects' | 'agents' | 'missions' | 'discovery' | 'evaluations' | 'recommendations' | 'wallets' | 'memory' | 'ledger' | 'settings'
 type Icon = LucideIcon
 
+const getCurrentPage = (): Page => {
+  const path = globalThis.location?.pathname ?? '/'
+  return ((path.slice(1) as Page) || 'overview')
+}
+
 const navGroups: { label: string; items: { id: Page; label: string; icon: Icon }[] }[] = [
   { label: 'Cockpit', items: [{ id: 'overview', label: 'Overview', icon: LayoutDashboard }, { id: 'capture', label: 'Capture', icon: Sparkles }, { id: 'projects', label: 'Projects', icon: Boxes }, { id: 'agents', label: 'Agents', icon: Bot }, { id: 'missions', label: 'Missions', icon: Compass }] },
   { label: 'Improve', items: [{ id: 'discovery', label: 'Tool Discovery', icon: Search }, { id: 'evaluations', label: 'Evaluations', icon: GitCompare }, { id: 'recommendations', label: 'Recommendations', icon: Lightbulb }] },
@@ -35,7 +40,7 @@ function jsonObject(value: string | undefined): Record<string, unknown> {
 function money(value: string | number | undefined) { return value === undefined ? '—' : `$${Number(value).toFixed(2)}` }
 
 export default function App() {
-  const [page, setPage] = useState<Page>((window.location.pathname.slice(1) as Page) || 'overview')
+  const [page, setPage] = useState<Page>(getCurrentPage())
   const [health, setHealth] = useState<Health | null>(null)
   const [projects, setProjects] = useState<Project[]>([])
   const [shadows, setShadows] = useState<Shadow[]>([])
@@ -58,10 +63,23 @@ export default function App() {
   }
 
   useEffect(() => { void load() }, [])
-  useEffect(() => { const onPop = () => setPage((window.location.pathname.slice(1) as Page) || 'overview'); window.addEventListener('popstate', onPop); return () => window.removeEventListener('popstate', onPop) }, [])
-  useEffect(() => { if (!toast) return; const timer = window.setTimeout(() => setToast(''), 3500); return () => window.clearTimeout(timer) }, [toast])
+  useEffect(() => {
+    const onPop = () => setPage(getCurrentPage())
+    globalThis.addEventListener?.('popstate', onPop)
+    return () => globalThis.removeEventListener?.('popstate', onPop)
+  }, [])
+  useEffect(() => {
+    if (!toast) return
+    const timer = globalThis.setTimeout(() => setToast(''), 3500)
+    return () => globalThis.clearTimeout(timer)
+  }, [toast])
 
-  const navigate = (next: Page) => { setPage(next); setMobileNav(false); window.history.pushState({}, '', next === 'overview' ? '/' : `/${next}`) }
+  const navigate = (next: Page) => {
+    setPage(next)
+    setMobileNav(false)
+    const history = globalThis.history
+    history?.pushState?.({}, '', next === 'overview' ? '/' : `/${next}`)
+  }
   const refresh = async () => { await load(); setToast('Canonical state refreshed') }
 
   return <div className="app">
@@ -182,4 +200,12 @@ function Ledger({ onToast }: { onToast: (value: string) => void }) {
   const inspectRun = async (e: FormEvent) => { e.preventDefault(); try { setRun(await api.agentRun(executionId)); onToast('AgentRun provenance loaded') } catch (err) { onToast(err instanceof Error ? err.message : 'AgentRun unavailable') } }
   return <><div className="grid grid-2"><section className="card card-accent"><div className="eyebrow">Append-only economic record</div><h2 style={{ margin: '8px 0 15px' }}>Inspect wallet ledger</h2><form className="row" onSubmit={load}><input style={{ flex: 1 }} required value={id} onChange={e => setId(e.target.value)} placeholder="wallet_…"/><button className="btn primary"><Archive size={14}/>Load ledger</button></form></section><section className="card"><div className="eyebrow">Cryptographic provenance</div><h2 style={{ margin: '8px 0 15px' }}>Inspect AgentRun</h2><form className="row" onSubmit={inspectRun}><input style={{ flex: 1 }} required value={executionId} onChange={e => setExecutionId(e.target.value)} placeholder="execution_id…"/><button className="btn secondary"><FileSearch size={14}/>Inspect</button></form></section></div>{run && <section className="card card-accent" style={{ marginTop: 14 }}><div className="row"><div><div className="eyebrow">Signed execution record</div><h2 style={{ margin: '8px 0' }}>{run.run_id}</h2></div>{statusChip(run.status)}</div><div className="grid grid-4" style={{ marginTop: 14 }}><HealthItem label="Authorization" value={run.authorization_status}/><HealthItem label="Runtime" value={run.runtime}/><HealthItem label="Signature" value={run.signature_algorithm}/><HealthItem label="Amount" value={money(run.amount)}/></div><EvidenceBlock title="Provenance hash" value={run.provenance_hash}/><EvidenceBlock title="Input / output hashes" value={{ input_hash: run.input_hash, output_hash: run.output_hash }}/><EvidenceBlock title="Usage receipt" value={run.usage}/></section>}<section className="card" style={{ marginTop: 14 }}><div className="table-wrap"><table><thead><tr><th>Event</th><th>Amount</th><th>Metadata</th><th>Created</th></tr></thead><tbody>{rows.map(row => <tr key={row.id}><td>{statusChip(row.event)}</td><td className="mono">{money(row.amount)}</td><td className="mono tiny">{row.metadata.slice(0, 110)}</td><td className="mono tiny">{row.created_at}</td></tr>)}</tbody></table></div>{!rows.length && <div className="notice" style={{ marginTop: 14 }}>Ledger entries are read-only. Load a wallet to inspect canonical events.</div>}</section></>
 }
-function SettingsPage({ health }: { health: Health | null }) { const [base, setBase] = useState(getApiBase()); const save = (e: FormEvent) => { e.preventDefault(); setApiBase(base); window.location.reload() }; return <div className="grid grid-2"><section className="card card-accent"><div className="eyebrow">Runtime connection</div><h2 style={{ margin: '8px 0 15px' }}>API base URL</h2><form className="form" onSubmit={save}><label>VITE_API_BASE_URL<input value={base} onChange={e => setBase(e.target.value)} /></label><button className="btn primary"><RefreshCw size={14}/>Save and reconnect</button></form><p className="muted tiny" style={{ lineHeight: 1.7 }}>The current default points to the active FastAPI preview. For a deployed environment, set VITE_API_BASE_URL at build time.</p></section><section className="card"><div className="eyebrow">Operating boundaries</div><h2 style={{ margin: '8px 0 15px' }}>What this cockpit does not do</h2><div className="stack"><HealthItem label="Purchases" value="not connected"/><HealthItem label="Subscription activation" value="not connected"/><HealthItem label="Shadow authority" value="none"/><HealthItem label="Execution authority" value="backend governed"/></div><div className="callout" style={{ marginTop: 18 }}><ShieldCheck size={15}/><span>Memory informs action. Memory cannot authorize action.</span></div></section><section className="card"><div className="eyebrow">Connected backend</div><h2 style={{ margin: '8px 0 15px' }}>Current state</h2>{health ? <div className="stack"><HealthItem label="Economic wallet" value={health.components.economic_wallet}/><HealthItem label="Memory ledger" value={health.components.memory.ledger_verified ? 'verified' : 'degraded'}/><HealthItem label="Pocket event ledger" value={health.components.pocket_os.event_ledger_verified ? 'verified' : 'degraded'}/></div> : <div className="notice">Backend health not available.</div>}</section></div> }
+function SettingsPage({ health }: { health: Health | null }) {
+  const [base, setBase] = useState(getApiBase())
+  const save = (e: FormEvent) => {
+    e.preventDefault();
+    setApiBase(base)
+    globalThis.location?.reload?.()
+  }
+  return <div className="grid grid-2"><section className="card card-accent"><div className="eyebrow">Runtime connection</div><h2 style={{ margin: '8px 0 15px' }}>API base URL</h2><form className="form" onSubmit={save}><label>VITE_API_BASE_URL<input value={base} onChange={e => setBase(e.target.value)} /></label><button className="btn primary"><RefreshCw size={14}/>Save and reconnect</button></form><p className="muted tiny" style={{ lineHeight: 1.7 }}>The current default points to the active FastAPI preview. For a deployed environment, set VITE_API_BASE_URL at build time.</p></section><section className="card"><div className="eyebrow">Operating boundaries</div><h2 style={{ margin: '8px 0 15px' }}>What this cockpit does not do</h2><div className="stack"><HealthItem label="Purchases" value="not connected"/><HealthItem label="Subscription activation" value="not connected"/><HealthItem label="Shadow authority" value="none"/><HealthItem label="Execution authority" value="backend governed"/></div><div className="callout" style={{ marginTop: 18 }}><ShieldCheck size={15}/><span>Memory informs action. Memory cannot authorize action.</span></div></section><section className="card"><div className="eyebrow">Connected backend</div><h2 style={{ margin: '8px 0 15px' }}>Current state</h2>{health ? <div className="stack"><HealthItem label="Economic wallet" value={health.components.economic_wallet}/><HealthItem label="Memory ledger" value={health.components.memory.ledger_verified ? 'verified' : 'degraded'}/><HealthItem label="Pocket event ledger" value={health.components.pocket_os.event_ledger_verified ? 'verified' : 'degraded'}/></div> : <div className="notice">Backend health not available.</div>}</section></div> }
+
