@@ -21,6 +21,10 @@ Tables (kept minimal):
 
 from __future__ import annotations
 
+import sqlite3
+
+from . import canonical
+
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS ledger_events (
     event_id            TEXT PRIMARY KEY,
@@ -137,7 +141,60 @@ CREATE TABLE IF NOT EXISTS memory_snapshots (
 """
 
 
+def _migrate_legacy_memories(conn: sqlite3.Connection) -> None:
+    """Upgrade the pre-MemoryBrain memories table without discarding records."""
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(memories)")}
+    if not columns or "status" in columns:
+        return
+    if "content" not in columns or "memory_id" not in columns:
+        raise RuntimeError("unsupported memories table; refusing destructive migration")
+
+    conn.execute("ALTER TABLE memories RENAME TO memories_legacy")
+    conn.executescript(SCHEMA_SQL)
+    legacy_rows = conn.execute("SELECT * FROM memories_legacy ORDER BY rowid").fetchall()
+    for row in legacy_rows:
+        source_id = row[3]
+        if source_id and conn.execute("SELECT 1 FROM memory_sources WHERE source_id=?", (source_id,)).fetchone() is None:
+            conn.execute(
+                "INSERT INTO memory_sources (source_id, source_type, external_ref) VALUES (?, ?, ?)",
+                (source_id, "legacy", source_id),
+            )
+        event_id = f"legacy-memory-{row[0]}"
+        payload = {
+            "content": row[1],
+            "memory_type": row[2] or "OBSERVATION",
+            "source_id": source_id,
+            "content_hash": row[6],
+            "legacy": True,
+        }
+        previous = conn.execute("SELECT event_hash FROM ledger_events ORDER BY rowid DESC LIMIT 1").fetchone()
+        previous_hash = previous[0] if previous else None
+        timestamp = row[5]
+        event_body = {
+            "event_id": event_id,
+            "timestamp": timestamp,
+            "event_type": "MEMORY_CREATED",
+            "payload": payload,
+            "previous_event_hash": previous_hash,
+            "algorithm_version": "1",
+        }
+        event_hash = canonical.digest(event_body, canonical.LEDGER_EVENT)
+        conn.execute(
+            "INSERT INTO ledger_events (event_id,timestamp,event_type,payload,previous_event_hash,event_hash,algorithm_version) VALUES (?,?,?,?,?,?,?)",
+            (event_id, timestamp, "MEMORY_CREATED", canonical.canonical_json(payload), previous_hash, event_hash, "1"),
+        )
+        normalized = row[1].strip().lower()
+        conn.execute(
+            "INSERT INTO memories (memory_id,memory_type,content,normalized_content,status,confidence,importance,created_at,updated_at,event_id,source_id,content_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (row[0], row[2] or "OBSERVATION", row[1], normalized, "RETRACTED" if row[7] else "ACTIVE", 0.5, 0.4, timestamp, timestamp, event_id, source_id, row[6]),
+        )
+    conn.execute("DROP TABLE memories_legacy")
+
+
 def load_schema(conn) -> None:
-    """Apply the schema to an open sqlite3 connection (idempotent)."""
+    """Apply the schema and safely upgrade the pre-MemoryBrain table."""
+    conn.execute("PRAGMA busy_timeout=5000")
+    conn.row_factory = sqlite3.Row
+    _migrate_legacy_memories(conn)
     conn.executescript(SCHEMA_SQL)
     conn.commit()
