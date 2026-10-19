@@ -73,6 +73,7 @@ export const api = {
   forgeValidations: (skillId: string) => request<ForgeValidation[]>(`/forge/skills/${encodeURIComponent(skillId)}/validations`),
   validateForgeSkill: (skillId: string, report: Record<string, unknown>) => request<{ validation_id: string; skill_id: string; decision: ForgeValidation['decision']; execution_authorized: false; note: string }>(`/forge/skills/${encodeURIComponent(skillId)}/validate`, { method: 'POST', body: JSON.stringify({ report }) }),
   externalTools: (status?: string) => request<ExternalTool[]>(`/tools${status ? `?status=${encodeURIComponent(status)}` : ''}`),
+  discoverExternalTool: (manifest: Record<string, unknown>, signature_b64?: string) => request<ExternalTool>('/tools/discover', { method: 'POST', body: JSON.stringify({ manifest, signature_b64: signature_b64 || null }) }),
   promotionEvidence: (proposalId: string) => request<PromotionEvidence>(`/upgrades/proposals/${encodeURIComponent(proposalId)}/promotion`),
   capture: (body: { wallet_id: string; content: string; task_type?: string; max_cost?: string; minimum_quality?: number; privacy_mode: 'local_only' | 'user_server' | 'approved_external'; capabilities?: string[]; actor?: string }) => request<CaptureResult>('/capture', { method: 'POST', body: JSON.stringify(body) }),
   captureById: (envelopeId: string) => request<CaptureResult>(`/capture/${encodeURIComponent(envelopeId)}`),
