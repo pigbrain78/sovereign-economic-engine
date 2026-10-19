@@ -1,9 +1,10 @@
-"""Fail-closed external tool discovery contracts.
+"""Fail-closed external tool discovery and proposal eligibility contracts.
 
 This module does not fetch arbitrary URLs. A provider adapter must supply a
 manifest and an attestation, while the server validates the source namespace,
-content digest, and (when configured) an Ed25519 signature. Discovery is a
-catalog operation only; it never grants execution or purchase authority.
+content digest, and (when configured) an Ed25519 signature. Discovery and
+eligibility are catalog decisions only; they never grant execution or purchase
+authority.
 """
 from __future__ import annotations
 
@@ -74,7 +75,7 @@ def verify_attestation(manifest: dict[str, Any], signature_b64: str | None) -> t
         public_key = Ed25519PublicKey.from_public_bytes(base64.b64decode(configured_key, validate=True))
         signature = base64.b64decode(signature_b64, validate=True)
         public_key.verify(signature, canonical_manifest(manifest).encode("utf-8"))
-    except (ValueError, InvalidSignature) as exc:
+    except (ValueError, InvalidSignature):
         return False, "ATTESTATION_SIGNATURE_INVALID"
     return True, "ATTESTATION_SIGNATURE_VERIFIED"
 
@@ -92,3 +93,36 @@ def evaluate_discovery(manifest: dict[str, Any], signature_b64: str | None = Non
         return {"status": "REJECTED", "eligible_for_proposal": False, "reason": "CONTENT_HASH_MISMATCH", "digest": digest}
     verified, reason = verify_attestation(manifest, signature_b64)
     return {"status": "VERIFIED" if verified else "UNVERIFIED", "eligible_for_proposal": verified, "reason": reason, "digest": digest}
+
+
+def proposal_eligibility(manifest: dict[str, Any], status: str, verification_reason: str, stored_digest: str) -> dict[str, Any]:
+    """Evaluate whether a catalog record may enter a human-reviewed proposal queue."""
+    checks: list[dict[str, Any]] = []
+
+    def check(key: str, passed: bool, reason: str) -> None:
+        checks.append({"key": key, "passed": passed, "reason": reason})
+
+    digest = manifest_digest(manifest) if isinstance(manifest, dict) else ""
+    check("attestation_verified", status == "VERIFIED" and verification_reason == "ATTESTATION_SIGNATURE_VERIFIED", "provider attestation must verify against the configured trust root")
+    check("manifest_digest_bound", bool(stored_digest) and stored_digest == digest and manifest.get("content_hash") == digest, "stored and declared manifest digests must match the canonical manifest")
+    try:
+        validate_source_url(str(manifest.get("source_url", "")))
+        source_ok = True
+        source_reason = "source is HTTPS and outside blocked local namespaces"
+    except ToolDiscoveryRejected as exc:
+        source_ok = False
+        source_reason = str(exc)
+    check("source_allowed", source_ok, source_reason)
+    check("risk_bounded", manifest.get("risk_level") in {"low", "medium", "high"}, "critical-risk tools require manual security admission before proposal")
+    permissions = manifest.get("permissions") if isinstance(manifest, dict) else None
+    dangerous = {"shell", "exec", "filesystem_write", "payment", "purchase", "credential_access", "unbounded_network"}
+    elevated = [key for key in dangerous if permissions.get(key) is True] if isinstance(permissions, dict) else list(dangerous)
+    check("permissions_bounded", isinstance(permissions, dict) and not elevated, "unbounded execution, credential, payment, or write permissions block automatic proposal eligibility")
+    eligible = all(item["passed"] for item in checks)
+    return {
+        "eligible_for_proposal": eligible,
+        "checks": checks,
+        "requires_human_ratification": True,
+        "execution_authorized": False,
+        "note": "Eligibility only permits entry into a human-reviewed proposal queue; it does not reserve funds, purchase, install, or execute the tool.",
+    }

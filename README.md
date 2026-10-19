@@ -291,6 +291,8 @@ This is a safe reference promotion layer, not a container or VM boundary. It doe
 
 The Pocket OS Treasury cockpit exposes this state under **Tool Discovery**. It reads the canonical catalog, filters by verification state, shows source/capability/permission evidence, and renders an explicit unavailable state when the backend cannot be reached. Operators can submit a provider manifest and optional Ed25519 signature through the intake form; a blank signature is intentionally recorded as `UNVERIFIED`, not promoted. **Sandbox Evidence** reads `GET /upgrades/proposals/{proposal_id}/promotion` and presents the structural receipt, candidate hash, canary state, promotion evidence, rollback evidence, and the non-authority boundary as read-only evidence.
 
+Automated proposal eligibility is exposed at `GET /tools/{tool_id}/eligibility` and is also included in catalog responses. The checker requires a verified attestation, matching canonical digest, allowed HTTPS source, bounded risk, and bounded permissions. A passing result means only that the record may enter the human-reviewed proposal queue; `requires_human_ratification` remains true and `execution_authorized` remains false. Critical-risk or dangerous permission records fail closed.
+
 ## Memory API
 
 - `POST /memory/remember`

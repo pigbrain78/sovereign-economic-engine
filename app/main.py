@@ -24,7 +24,7 @@ from app.local_executor import LocalCommandExecutor, LocalExecutorUnavailable
 from app.local_model import LocalModelUnavailable, local_model_status, select_local_model
 from app.crypto_provenance.provenance import agent_run_digest, sign_agent_run, signing_algorithm
 from app.skill_forge import evaluate_validation, normalize_permissions, skill_hash, validate_genome
-from app.tool_discovery import evaluate_discovery, manifest_digest
+from app.tool_discovery import evaluate_discovery, manifest_digest, proposal_eligibility
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = Path(__import__('os').environ.get('SOVEREIGN_DB', BASE_DIR / 'sovereign.db'))
@@ -830,7 +830,8 @@ def propose_forge_skill(skill_id: str, payload: SkillProposalRequest) -> dict[st
 def external_tool_response(row: sqlite3.Row) -> dict[str, Any]:
     result = row_dict(row) or {}
     result['manifest'] = json.loads(result['manifest'])
-    result['eligible_for_proposal'] = result['status'] == 'VERIFIED'
+    result['eligibility'] = proposal_eligibility(result['manifest'], result['status'], result['verification_reason'], result['manifest_digest'])
+    result['eligible_for_proposal'] = result['eligibility']['eligible_for_proposal']
     result['execution_authorized'] = False
     return result
 
@@ -872,6 +873,22 @@ def get_external_tool(tool_id: str) -> dict[str, Any]:
         if not row:
             raise HTTPException(404, 'external tool not found')
         return external_tool_response(row)
+
+
+@app.get('/tools/{tool_id}/eligibility')
+def get_external_tool_eligibility(tool_id: str) -> dict[str, Any]:
+    with closing(connect()) as db:
+        row = db.execute('SELECT * FROM external_tools WHERE tool_id = ?', (tool_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, 'external tool not found')
+        result = external_tool_response(row)
+        return {
+            'tool_id': tool_id,
+            'version': result['version'],
+            'status': result['status'],
+            'eligibility': result['eligibility'],
+            'execution_authorized': False,
+        }
 
 
 @app.post('/pocket/projects', status_code=201)
