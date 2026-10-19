@@ -289,6 +289,8 @@ This is a safe reference promotion layer, not a container or VM boundary. It doe
 
 `POST /tools/discover` accepts a provider-supplied manifest but never fetches an arbitrary URL. The source must be HTTPS, must not contain credentials or fragments, and private/loopback/local addresses are rejected. The manifest has a deterministic content digest; when `TOOL_DISCOVERY_PUBLIC_KEY_B64` is configured, an Ed25519 attestation over the canonical manifest is required for `VERIFIED` status. Without that configured trust root, discovery remains `UNVERIFIED` and cannot become a proposal candidate. `GET /tools` and `GET /tools/{tool_id}` expose the catalog with `eligible_for_proposal` and `execution_authorized: false`. Discovery is catalog evidence only: it does not download, install, purchase, reserve, or execute a tool.
 
+The Pocket OS Treasury cockpit exposes this state under **Tool Discovery**. It reads the canonical catalog, filters by verification state, shows source/capability/permission evidence, and renders an explicit unavailable state when the backend cannot be reached. **Sandbox Evidence** reads `GET /upgrades/proposals/{proposal_id}/promotion` and presents the structural receipt, candidate hash, canary state, promotion evidence, rollback evidence, and the non-authority boundary as read-only evidence.
+
 ## Memory API
 
 - `POST /memory/remember`
