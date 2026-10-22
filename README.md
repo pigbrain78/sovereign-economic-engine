@@ -295,6 +295,8 @@ Automated proposal eligibility is exposed at `GET /tools/{tool_id}/eligibility` 
 
 Eligible records can be drafted into the ordinary Pocket OS proposal queue through `POST /tools/{tool_id}/proposals`. The backend rechecks eligibility, binds the manifest digest and eligibility checks into proposal evidence, and creates `HOLD_FOR_APPROVAL` with `authority: NONE`. The cockpit exposes this as **Draft held proposal** and never reserves wallet funds or executes the tool.
 
+Held proposals now require an explicit human ratification payload at `POST /pocket/proposals/{proposal_id}/decision`: `decision`, `actor`, and a non-empty `reason`. The backend rejects known AI/agent/system actors, persists `decision_actor` and `decision_reason`, appends the reason to the Pocket OS event ledger, and returns `authority: HUMAN_RATIFIED` while keeping `execution_authorized: false`. The cockpit uses a review form rather than one-click approval and keeps approved proposals in `USER_APPROVED_PENDING_EXTERNAL_PURCHASE` until a separate governed purchase workflow exists.
+
 ## Memory API
 
 - `POST /memory/remember`

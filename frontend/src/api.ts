@@ -14,7 +14,7 @@ export type Project = { project_id: string; name: string; description: string; s
 export type Loop = { loop_id: string; project_id: string; title: string; objective: string; status: string; created_at: string }
 export type Shadow = { shadow_id: string; project_id: string; kind: string; content: string; confidence: number; evidence: string; authority: 'NONE'; can_execute: false; can_ratify: false; created_at: string }
 export type Proposal = {
-  proposal_id: string; project_id: string; loop_id?: string; shadow_id?: string; agent_id: string; title: string; category: string; candidate: string; proposed_cost: string; recurring: number; access_level: string; expected_benefit: string; evidence: string; recommendation: string; status: string; authority: string; execution_authorized: false; created_at: string; approved_at?: string
+  proposal_id: string; project_id: string; loop_id?: string; shadow_id?: string; agent_id: string; title: string; category: string; candidate: string; proposed_cost: string; recurring: number; access_level: string; expected_benefit: string; evidence: string; recommendation: string; status: string; authority: string; execution_authorized: false; created_at: string; approved_at?: string; decision_actor?: string; decision_reason?: string
 }
 export type Wallet = { id: string; total: string; available: string; reserved: string; spent: string; minimum_liquidity: string; development_reserve: string; safety_reserve: string; owner_reserve: string; development_rate_bps: number; safety_rate_bps: number; owner_rate_bps: number; created_at: string }
 export type UpgradeProposal = { proposal_id: string; wallet_id: string; target_module: string; estimated_cost: string; predicted_monthly_value: string; predicted_roi: number; actual_roi: number | null; status: string; rdp_metrics: string | null; scenario_paths: string; selected_path: string | null; signature_proof: string | null; approval_actor: string | null; reserved_amount: string; evidence: string; created_at: string; updated_at: string }
@@ -57,7 +57,7 @@ export const api = {
   shadow: (projectId?: string) => request<Shadow[]>(`/pocket/shadow${projectId ? `?project_id=${encodeURIComponent(projectId)}` : ''}`),
   createShadow: (projectId: string, body: { kind: string; content: string; confidence: number; evidence: Record<string, unknown>[] }) => request<Shadow>(`/pocket/projects/${projectId}/shadow`, { method: 'POST', body: JSON.stringify(body) }),
   proposals: (status?: string) => request<Proposal[]>(`/pocket/proposals${status ? `?status=${encodeURIComponent(status)}` : ''}`),
-  decideProposal: (proposalId: string, decision: 'approve' | 'reject' | 'request_more_testing', actor: string) => request<Proposal & { note?: string }>(`/pocket/proposals/${proposalId}/decision`, { method: 'POST', body: JSON.stringify({ decision, actor }) }),
+  decideProposal: (proposalId: string, decision: 'approve' | 'reject' | 'request_more_testing', actor: string, reason: string) => request<Proposal & { note?: string; ratification?: Record<string, unknown> }>(`/pocket/proposals/${proposalId}/decision`, { method: 'POST', body: JSON.stringify({ decision, actor, reason }) }),
   wallets: (id: string) => request<Wallet>(`/wallets/${id}`),
   walletDeposit: (id: string, amount: string) => request<Wallet>(`/wallets/${id}/deposit`, { method: 'POST', body: JSON.stringify({ amount }) }),
   upgradeProposals: (walletId: string) => request<UpgradeProposal[]>(`/upgrades/proposals?wallet_id=${encodeURIComponent(walletId)}`),

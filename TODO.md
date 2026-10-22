@@ -4,6 +4,7 @@
 - [x] The Tool Discovery cockpit provides governed manifest intake through `POST /tools/discover`; a submitted manifest and optional Ed25519 signature are recorded as catalog evidence only, and a blank signature remains `UNVERIFIED` and non-eligible.
 - [x] Automated proposal eligibility evaluates attestation, canonical digest binding, source safety, risk, and permission bounds through `GET /tools/{tool_id}/eligibility`; passing eligibility only permits entry into a human-reviewed proposal queue and never sets `execution_authorized` to true.
 - [x] Eligible external tools can be rechecked and drafted through `POST /tools/{tool_id}/proposals`; the resulting Pocket OS proposal is evidence-backed, `HOLD_FOR_APPROVAL`, `authority: NONE`, and does not reserve wallet funds, purchase, install, or execute anything.
+- [x] Held proposals require a human actor, explicit decision, and non-empty reason; ratification is persisted and ledgered, known AI/agent/system actors are rejected, and approval remains `USER_APPROVED_PENDING_EXTERNAL_PURCHASE` with `execution_authorized: false`.
 - [x] The Sandbox Evidence cockpit page reads `GET /upgrades/proposals/{proposal_id}/promotion`, displays verification, promotion, rollback, candidate hash, lifecycle, canary percentage, and explicit non-authority messaging, and keeps historical evidence read-only.
 - [x] The route manifest includes `/sandbox` and remains synchronized with the frontend page set.
 - [x] Backend compilation, full pytest suite, frontend TypeScript check, and production build pass for this milestone.

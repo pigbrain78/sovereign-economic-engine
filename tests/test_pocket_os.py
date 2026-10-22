@@ -69,12 +69,17 @@ def test_pocket_builder_proposal_requires_evidence_and_human_decision():
     assert proposal.json()['status'] == 'HOLD_FOR_APPROVAL'
     assert proposal.json()['execution_authorized'] is False
 
+    missing_reason = client.post(f"/pocket/proposals/{proposal.json()['proposal_id']}/decision", json={'decision': 'approve', 'actor': 'user'})
+    assert missing_reason.status_code == 422
     approved = client.post(f"/pocket/proposals/{proposal.json()['proposal_id']}/decision", json={
-        'decision': 'approve', 'actor': 'user',
+        'decision': 'approve', 'actor': 'user', 'reason': 'Evidence supports a bounded trial and the cost is acceptable.',
     })
     assert approved.status_code == 200
     assert approved.json()['status'] == 'USER_APPROVED_PENDING_EXTERNAL_PURCHASE'
     assert approved.json()['execution_authorized'] is False
+    assert approved.json()['decision_actor'] == 'user'
+    assert approved.json()['decision_reason'].startswith('Evidence supports')
+    assert approved.json()['ratification']['authority'] == 'HUMAN_RATIFIED'
     assert 'does not purchase' in approved.json()['note']
 
 
@@ -94,10 +99,10 @@ def test_shadow_cannot_approve_or_execute():
         'expected_benefit': {'metric': 'coverage', 'candidate': 0.8},
         'evidence': [{'runs': 3}], 'recommendation': 'HOLD_FOR_APPROVAL',
     }).json()
-    approved = client.post(f"/pocket/proposals/{proposal['proposal_id']}/decision", json={'decision': 'approve', 'actor': 'user'})
+    approved = client.post(f"/pocket/proposals/{proposal['proposal_id']}/decision", json={'decision': 'approve', 'actor': 'user', 'reason': 'Human reviewed the evidence and approved a bounded review.'})
     assert approved.status_code == 200
-    replay = client.post(f"/pocket/proposals/{proposal['proposal_id']}/decision", json={'decision': 'approve', 'actor': 'shadow'})
-    assert replay.status_code == 409
+    replay = client.post(f"/pocket/proposals/{proposal['proposal_id']}/decision", json={'decision': 'approve', 'actor': 'shadow', 'reason': 'Attempted advisory approval must be blocked.'})
+    assert replay.status_code == 403
 
     events = client.get('/pocket/events').json()
     assert any(event['event_type'] == 'PROPOSAL_DECIDED' for event in events)

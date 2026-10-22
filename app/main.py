@@ -248,7 +248,9 @@ def init_db() -> None:
             authority TEXT NOT NULL,
             execution_authorized INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL,
-            approved_at TEXT
+            approved_at TEXT,
+            decision_actor TEXT,
+            decision_reason TEXT
         );
         CREATE TABLE IF NOT EXISTS pocket_events (
             sequence INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -365,6 +367,13 @@ def init_db() -> None:
         }.items():
             if column not in agent_run_columns:
                 db.execute(f'ALTER TABLE agent_runs ADD COLUMN {column} {definition}')
+        proposal_columns = {row['name'] for row in db.execute('PRAGMA table_info(pocket_proposals)').fetchall()}
+        for column, definition in {
+            'decision_actor': 'TEXT',
+            'decision_reason': 'TEXT',
+        }.items():
+            if column not in proposal_columns:
+                db.execute(f'ALTER TABLE pocket_proposals ADD COLUMN {column} {definition}')
         db.commit()
 
 
@@ -565,7 +574,8 @@ class ProposalCreate(BaseModel):
 
 class ProposalApproval(BaseModel):
     decision: str = Field(pattern=r'^(approve|reject|request_more_testing)$')
-    actor: str = Field(min_length=1)
+    actor: str = Field(min_length=1, max_length=120)
+    reason: str = Field(min_length=3, max_length=1000)
 class SkillRegistration(BaseModel):
     genome: dict[str, Any]
     files: list[dict[str, Any]] = Field(default_factory=list)
@@ -1037,6 +1047,8 @@ def list_pocket_proposals(status: str | None = None) -> list[dict[str, Any]]:
 def decide_pocket_proposal(proposal_id: str, payload: ProposalApproval) -> dict[str, Any]:
     with closing(connect()) as db:
         proposal = require_proposal(db, proposal_id)
+        if payload.actor.strip().lower() in {'shadow', 'ai', 'agent', 'system', 'builder-agent'}:
+            raise HTTPException(403, 'only a human actor may ratify a proposal')
         if payload.decision == 'approve':
             if proposal['status'] != 'HOLD_FOR_APPROVAL':
                 raise HTTPException(409, 'only a proposal in HOLD_FOR_APPROVAL can be approved')
@@ -1047,12 +1059,13 @@ def decide_pocket_proposal(proposal_id: str, payload: ProposalApproval) -> dict[
             status, authority, approved_at = 'REJECTED', 'HUMAN_RATIFIED', None
         else:
             status, authority, approved_at = 'TRIAL_EXTENDED', 'HUMAN_RATIFIED', None
-        db.execute('UPDATE pocket_proposals SET status = ?, authority = ?, approved_at = ? WHERE proposal_id = ?', (status, authority, approved_at, proposal_id))
-        pocket_event(db, 'PROPOSAL_DECIDED', proposal_id, {'decision': payload.decision, 'actor': payload.actor, 'status': status, 'execution_authorized': False})
+        db.execute('UPDATE pocket_proposals SET status = ?, authority = ?, approved_at = ?, decision_actor = ?, decision_reason = ? WHERE proposal_id = ?', (status, authority, approved_at, payload.actor.strip(), payload.reason.strip(), proposal_id))
+        pocket_event(db, 'PROPOSAL_DECIDED', proposal_id, {'decision': payload.decision, 'actor': payload.actor.strip(), 'reason': payload.reason.strip(), 'status': status, 'authority': 'HUMAN_RATIFIED', 'execution_authorized': False})
         db.commit()
         result = row_dict(db.execute('SELECT * FROM pocket_proposals WHERE proposal_id = ?', (proposal_id,)).fetchone()) or {}
         result['execution_authorized'] = False
-        result['note'] = 'Approval records a human decision only; it does not purchase, reserve, or authorize execution.'
+        result['ratification'] = {'actor': payload.actor.strip(), 'reason': payload.reason.strip(), 'decision': payload.decision, 'authority': 'HUMAN_RATIFIED'}
+        result['note'] = 'Human ratification records a decision only; it does not purchase, reserve, or authorize execution.'
         return result
 
 
