@@ -1,11 +1,13 @@
 import base64
 import uuid
+from pathlib import Path
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from app.tool_discovery import canonical_manifest, evaluate_discovery, manifest_digest, proposal_eligibility
 from fastapi.testclient import TestClient
+import app.main as main
 from app.main import app
 
 
@@ -98,3 +100,34 @@ def test_proposal_eligibility_api_exposes_structured_checks(monkeypatch):
     assert body['eligibility']['eligible_for_proposal'] is False
     assert {check['key'] for check in body['eligibility']['checks']} == {'attestation_verified', 'manifest_digest_bound', 'source_allowed', 'risk_bounded', 'permissions_bounded'}
     assert body['execution_authorized'] is False
+
+
+def test_external_tool_proposal_bridge_rechecks_eligibility_and_holds_for_approval(monkeypatch, tmp_path):
+    monkeypatch.setattr(main, 'DB_PATH', Path(tmp_path) / 'bridge.db')
+    main.init_db()
+    project = TestClient(app).post('/pocket/projects', json={'name': 'Bridge Test', 'description': 'isolated proposal bridge test'}).json()
+    candidate = manifest()
+    candidate['tool_id'] = f"tool.example.bridge.{uuid.uuid4().hex[:10]}"
+    monkeypatch.delenv('TOOL_DISCOVERY_PUBLIC_KEY_B64', raising=False)
+    candidate['content_hash'] = manifest_digest(candidate)
+    TestClient(app).post('/tools/discover', json={'manifest': candidate})
+    blocked = TestClient(app).post(f"/tools/{candidate['tool_id']}/proposals", json={'project_id': project['project_id'], 'proposed_cost': '0.010000'})
+    assert blocked.status_code == 409
+    assert blocked.json()['detail']['reason'] == 'TOOL_NOT_ELIGIBLE_FOR_PROPOSAL'
+
+    key = Ed25519PrivateKey.generate()
+    public = base64.b64encode(key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)).decode()
+    monkeypatch.setenv('TOOL_DISCOVERY_PUBLIC_KEY_B64', public)
+    verified_candidate = manifest()
+    verified_candidate['tool_id'] = f"tool.example.bridge.verified.{uuid.uuid4().hex[:10]}"
+    verified_candidate['content_hash'] = manifest_digest(verified_candidate)
+    signature = base64.b64encode(key.sign(canonical_manifest(verified_candidate).encode())).decode()
+    discovered = TestClient(app).post('/tools/discover', json={'manifest': verified_candidate, 'signature_b64': signature})
+    assert discovered.status_code == 201
+    proposal = TestClient(app).post(f"/tools/{verified_candidate['tool_id']}/proposals", json={'project_id': project['project_id'], 'proposed_cost': '0.010000', 'expected_benefit': {'metric': 'search_quality'}})
+    assert proposal.status_code == 201
+    body = proposal.json()
+    assert body['status'] == 'HOLD_FOR_APPROVAL'
+    assert body['authority'] == 'NONE'
+    assert body['execution_authorized'] is False
+    assert body['category'] == 'external_tool'

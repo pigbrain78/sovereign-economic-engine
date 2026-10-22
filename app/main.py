@@ -592,6 +592,17 @@ class SkillExecutionLogRequest(BaseModel):
 class ExternalToolDiscoveryRequest(BaseModel):
     manifest: dict[str, Any]
     signature_b64: str | None = None
+
+
+class ExternalToolProposalRequest(BaseModel):
+    project_id: str
+    loop_id: str | None = None
+    shadow_id: str | None = None
+    agent_id: str = Field(default='tool-discovery-agent', min_length=1)
+    proposed_cost: str = Field(pattern=r'^\d+(\.\d{1,6})?$')
+    recurring: bool = False
+    expected_benefit: dict[str, Any] = Field(default_factory=dict)
+    evidence: list[dict[str, Any]] = Field(default_factory=list)
 class CanaryEvidence(BaseModel):
     runtime: str = Field(min_length=1)
     exit_code: int
@@ -889,6 +900,50 @@ def get_external_tool_eligibility(tool_id: str) -> dict[str, Any]:
             'eligibility': result['eligibility'],
             'execution_authorized': False,
         }
+
+
+@app.post('/tools/{tool_id}/proposals', status_code=201)
+def draft_external_tool_proposal(tool_id: str, payload: ExternalToolProposalRequest) -> dict[str, Any]:
+    with closing(connect()) as db:
+        row = db.execute('SELECT * FROM external_tools WHERE tool_id = ?', (tool_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, 'external tool not found')
+        tool = external_tool_response(row)
+    eligibility = tool['eligibility']
+    if not eligibility['eligible_for_proposal']:
+        raise HTTPException(409, {
+            'reason': 'TOOL_NOT_ELIGIBLE_FOR_PROPOSAL',
+            'tool_id': tool_id,
+            'eligibility': eligibility,
+            'execution_authorized': False,
+        })
+    manifest = tool['manifest']
+    permissions = manifest.get('permissions', {}) if isinstance(manifest, dict) else {}
+    access_level = 'write' if isinstance(permissions, dict) and permissions.get('write') is True else 'read_only'
+    evidence = [
+        {'kind': 'external_tool_manifest', 'tool_id': tool_id, 'version': tool['version'], 'manifest_digest': tool['manifest_digest']},
+        {'kind': 'automated_proposal_eligibility', 'checks': eligibility['checks'], 'verification_reason': tool['verification_reason']},
+        *payload.evidence,
+    ]
+    proposal = ProposalCreate(
+        project_id=payload.project_id,
+        loop_id=payload.loop_id,
+        shadow_id=payload.shadow_id,
+        agent_id=payload.agent_id,
+        title=f"Evaluate external tool: {manifest.get('name', tool_id)}",
+        category='external_tool',
+        candidate={'tool_id': tool_id, 'version': tool['version'], 'name': manifest.get('name', tool_id), 'provider': manifest.get('provider'), 'manifest_digest': tool['manifest_digest'], 'permissions': permissions},
+        proposed_cost=payload.proposed_cost,
+        recurring=payload.recurring,
+        access_level=access_level,
+        expected_benefit=payload.expected_benefit,
+        evidence=evidence,
+        recommendation='HOLD_FOR_APPROVAL',
+    )
+    result = create_pocket_proposal(proposal)
+    result['execution_authorized'] = False
+    result['note'] = 'External tool proposal drafted from a fresh eligibility check; human ratification, wallet policy, and sandbox evidence remain required. No purchase or execution occurred.'
+    return result
 
 
 @app.post('/pocket/projects', status_code=201)

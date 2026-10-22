@@ -77,6 +77,7 @@ export const api = {
   externalTools: (status?: string) => request<ExternalTool[]>(`/tools${status ? `?status=${encodeURIComponent(status)}` : ''}`),
   discoverExternalTool: (manifest: Record<string, unknown>, signature_b64?: string) => request<ExternalTool>('/tools/discover', { method: 'POST', body: JSON.stringify({ manifest, signature_b64: signature_b64 || null }) }),
   externalToolEligibility: (toolId: string) => request<{ tool_id: string; version: string; status: string; eligibility: ProposalEligibility; execution_authorized: false }>(`/tools/${encodeURIComponent(toolId)}/eligibility`),
+  draftExternalToolProposal: (toolId: string, body: { project_id: string; proposed_cost: string; loop_id?: string; expected_benefit?: Record<string, unknown>; evidence?: Record<string, unknown>[] }) => request<Record<string, unknown>>(`/tools/${encodeURIComponent(toolId)}/proposals`, { method: 'POST', body: JSON.stringify(body) }),
   promotionEvidence: (proposalId: string) => request<PromotionEvidence>(`/upgrades/proposals/${encodeURIComponent(proposalId)}/promotion`),
   capture: (body: { wallet_id: string; content: string; task_type?: string; max_cost?: string; minimum_quality?: number; privacy_mode: 'local_only' | 'user_server' | 'approved_external'; capabilities?: string[]; actor?: string }) => request<CaptureResult>('/capture', { method: 'POST', body: JSON.stringify(body) }),
   captureById: (envelopeId: string) => request<CaptureResult>(`/capture/${encodeURIComponent(envelopeId)}`),

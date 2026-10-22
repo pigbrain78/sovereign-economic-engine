@@ -293,6 +293,8 @@ The Pocket OS Treasury cockpit exposes this state under **Tool Discovery**. It r
 
 Automated proposal eligibility is exposed at `GET /tools/{tool_id}/eligibility` and is also included in catalog responses. The checker requires a verified attestation, matching canonical digest, allowed HTTPS source, bounded risk, and bounded permissions. A passing result means only that the record may enter the human-reviewed proposal queue; `requires_human_ratification` remains true and `execution_authorized` remains false. Critical-risk or dangerous permission records fail closed.
 
+Eligible records can be drafted into the ordinary Pocket OS proposal queue through `POST /tools/{tool_id}/proposals`. The backend rechecks eligibility, binds the manifest digest and eligibility checks into proposal evidence, and creates `HOLD_FOR_APPROVAL` with `authority: NONE`. The cockpit exposes this as **Draft held proposal** and never reserves wallet funds or executes the tool.
+
 ## Memory API
 
 - `POST /memory/remember`
