@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, ValidationError
 from app.substrate import PricingPolicy, ResourceUsage
@@ -40,8 +42,9 @@ app.add_middleware(
 MICRO_BILLING = SynapseMicroBillingEngine()
 MEMORY = MemoryAPI(__import__('os').environ.get('SOVEREIGN_MEMORY_DB', BASE_DIR / 'sovereign-memory.db'))
 SANDBOX = SandboxPromotion(__import__('os').environ.get('SOVEREIGN_SANDBOX_ROOT', BASE_DIR / '.sandbox'))
-
-
+FRONTEND_DIST = BASE_DIR / 'frontend' / 'dist'
+if (FRONTEND_DIST / 'assets').is_dir():
+    app.mount('/assets', StaticFiles(directory=FRONTEND_DIST / 'assets'), name='frontend-assets')
 def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -1802,6 +1805,32 @@ def memory_retract(memory_id: str, payload: MemoryRetractRequest) -> dict[str, A
         return MEMORY.retract(memory_id, payload.reason, payload.actor)
     except KeyError as exc:
         raise HTTPException(404, 'memory not found') from exc
+
+
+@app.get('/', include_in_schema=False)
+def frontend_index() -> FileResponse:
+    index = FRONTEND_DIST / 'index.html'
+    if not index.is_file():
+        raise HTTPException(404, 'frontend build not available')
+    return FileResponse(index)
+
+
+@app.get('/manus-routes.json', include_in_schema=False)
+def frontend_routes_manifest() -> FileResponse:
+    manifest = FRONTEND_DIST / 'manus-routes.json'
+    if not manifest.is_file():
+        raise HTTPException(404, 'frontend route manifest not available')
+    return FileResponse(manifest, media_type='application/json')
+
+
+@app.get('/{path:path}', include_in_schema=False)
+def frontend_fallback(path: str) -> FileResponse:
+    if path.startswith('assets/') or path.startswith(('api/', 'pocket/', 'tools/', 'wallets/', 'upgrades/', 'memory/', 'agent-runs/', 'hf/', 'forge/', 'ledger/', 'local-')):
+        raise HTTPException(404, 'route not found')
+    index = FRONTEND_DIST / 'index.html'
+    if not index.is_file():
+        raise HTTPException(404, 'frontend build not available')
+    return FileResponse(index)
 
 
 init_db()

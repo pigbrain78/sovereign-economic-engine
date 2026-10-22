@@ -35,8 +35,8 @@ export type CaptureResult = { memory: { memory_id: string; content: string; memo
 export type LocalExecution = { execution_id: string; envelope_id: string; model_id?: string; runtime?: string; status: string; output: string; stderr: string; usage: Record<string, string | number>; amount: string; execution_authorized: boolean; escrow_reserved: boolean; note?: string; idempotent_replay?: boolean; wallet?: Wallet }
 export type LocalModels = { runtime: string; cloud_calls: boolean; configured: boolean; models: Array<Record<string, unknown>>; note: string }
 
-const defaultBase = 'https://8000-inn0u6a8zgt70vdzkc85q-e5a55957.us1.manus.computer'
-export const getApiBase = () => localStorage.getItem('pocket_api_base') || import.meta.env.VITE_API_BASE_URL || defaultBase
+const localDevelopmentBase = 'https://8000-inn0u6a8zgt70vdzkc85q-e5a55957.us1.manus.computer'
+export const getApiBase = () => localStorage.getItem('pocket_api_base') || import.meta.env.VITE_API_BASE_URL || (import.meta.env.PROD ? window.location.origin : localDevelopmentBase)
 export const setApiBase = (value: string) => localStorage.setItem('pocket_api_base', value.replace(/\/$/, ''))
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
